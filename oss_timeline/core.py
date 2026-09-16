@@ -82,10 +82,27 @@ class HttpClient:
                 with urllib.request.urlopen(request, timeout=25) as response:
                     return json.load(response), dict(response.headers)
             except urllib.error.HTTPError as exc:
+                retry_after = exc.headers.get("Retry-After")
+                reset = exc.headers.get("X-RateLimit-Reset")
+                exhausted = exc.headers.get("X-RateLimit-Remaining") == "0"
+                if exc.code in {403, 429} and (exhausted or retry_after):
+                    try:
+                        wait = max(0, int(retry_after)) if retry_after else max(0, int(reset) - int(time.time()) + 1)
+                    except (TypeError, ValueError):
+                        wait = 0
+                    if attempt < 2 and 0 < wait <= 30:
+                        time.sleep(wait)
+                        continue
+                    detail = "GitHub API 한도에 도달했습니다. GITHUB_TOKEN을 설정하거나 한도 재설정 후 다시 시도하세요" if github else "OSV API 한도에 도달했습니다. 한도 재설정 후 다시 시도하세요"
+                    if reset:
+                        detail += f" (reset Unix time: {reset})"
+                    raise ApiError(detail) from exc
                 if exc.code in {429, 502, 503, 504} and attempt < 2:
                     time.sleep(2 ** attempt)
                     continue
                 detail = exc.read(300).decode("utf-8", "replace")
+                if exc.code == 403 and "API rate limit exceeded" in detail:
+                    raise ApiError("GitHub API 한도에 도달했습니다. GITHUB_TOKEN을 설정하거나 한도 재설정 후 다시 시도하세요") from exc
                 raise ApiError(f"{host} HTTP {exc.code}: {detail}") from exc
             except (urllib.error.URLError, TimeoutError) as exc:
                 if attempt < 2:
@@ -256,6 +273,11 @@ def advisory_key(row: dict) -> str:
 def normalize_advisory(row: dict, source: str, package: tuple[str, str] | None = None) -> dict:
     key = advisory_key(row)
     affected = []
+    raw_cwes = (row.get("database_specific") or {}).get("cwe_ids", []) if source == "OSV" else (row.get("cwes") or row.get("cwe_ids") or [])
+    cwe_ids = sorted({value for item in (raw_cwes or []) if isinstance(value := (item.get("cwe_id") if isinstance(item, dict) else item), str) and re.fullmatch(r"CWE-[0-9]+", value)})
+    cwe_names = {x["cwe_id"]: x["name"] for x in (raw_cwes or []) if isinstance(x, dict) and x.get("cwe_id") in cwe_ids and isinstance(x.get("name"), str)}
+    identifiers = {x.get("type"): x.get("value") for x in row.get("identifiers", []) if isinstance(x, dict)}
+    references = [x if isinstance(x, str) else x.get("url") for x in (row.get("references") or []) if isinstance(x, (str, dict))]
     if source == "OSV":
         for item in row.get("affected", []):
             p = item.get("package", {})
@@ -272,7 +294,7 @@ def normalize_advisory(row: dict, source: str, package: tuple[str, str] | None =
         cvss = (row.get("cvss") or {}).get("score")
         stamp = row.get("published_at")
         url = row.get("html_url")
-    return {"id": key, "ghsa": row.get("ghsa_id") or next((x for x in row.get("aliases", []) if x.startswith("GHSA-")), None), "cve": row.get("cve_id") or next((x for x in row.get("aliases", []) if x.startswith("CVE-")), None), "published_at": stamp, "modified_at": row.get("updated_at") or row.get("modified"), "summary": row.get("summary") or "", "severity": row.get("severity") or "unknown", "cvss": cvss, "url": url, "source": source, "affected": affected}
+    return {"id": key, "ghsa": row.get("ghsa_id") or identifiers.get("GHSA") or next((x for x in row.get("aliases", []) if x.startswith("GHSA-")), None), "cve": row.get("cve_id") or identifiers.get("CVE") or next((x for x in row.get("aliases", []) if x.startswith("CVE-")), None), "published_at": stamp, "modified_at": row.get("updated_at") or row.get("modified"), "summary": row.get("summary") or "", "severity": row.get("severity") or "unknown", "cvss": cvss, "cwe_ids": cwe_ids, "cwe_names": cwe_names, "url": url, "source": source, "affected": affected, "references": [x for x in references if isinstance(x, str)]}
 
 
 class AdvisoryAgent:
@@ -403,7 +425,7 @@ class Store:
             PRAGMA foreign_keys=ON;
             CREATE TABLE IF NOT EXISTS repositories (name TEXT PRIMARY KEY, url TEXT NOT NULL, last_sync TEXT, coverage TEXT NOT NULL DEFAULT '{}', warnings TEXT NOT NULL DEFAULT '[]');
             CREATE TABLE IF NOT EXISTS packages (repo TEXT NOT NULL, ecosystem TEXT NOT NULL, name TEXT NOT NULL, manifest TEXT NOT NULL, PRIMARY KEY(repo, ecosystem, name, manifest));
-            CREATE TABLE IF NOT EXISTS advisories (id TEXT PRIMARY KEY, ghsa TEXT, cve TEXT, published_at TEXT, modified_at TEXT, first_seen TEXT NOT NULL, last_seen TEXT NOT NULL, summary TEXT, severity TEXT, cvss REAL, url TEXT, sources TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS advisories (id TEXT PRIMARY KEY, ghsa TEXT, cve TEXT, published_at TEXT, modified_at TEXT, first_seen TEXT NOT NULL, last_seen TEXT NOT NULL, summary TEXT, severity TEXT, cvss REAL, cwe_ids TEXT NOT NULL DEFAULT '[]', cwe_names TEXT NOT NULL DEFAULT '{}', url TEXT, sources TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS advisory_observations (advisory_id TEXT NOT NULL, observed_at TEXT NOT NULL, modified_at TEXT, content_hash TEXT NOT NULL, PRIMARY KEY(advisory_id,content_hash));
             CREATE TABLE IF NOT EXISTS advisory_repos (advisory_id TEXT NOT NULL, repo TEXT NOT NULL, PRIMARY KEY(advisory_id, repo));
             CREATE TABLE IF NOT EXISTS advisory_packages (advisory_id TEXT NOT NULL, repo TEXT NOT NULL, ecosystem TEXT NOT NULL, name TEXT NOT NULL, version_range TEXT, patched TEXT, PRIMARY KEY(advisory_id, repo, ecosystem, name));
@@ -415,6 +437,11 @@ class Store:
             self.db.execute("ALTER TABLE findings ADD COLUMN paths TEXT NOT NULL DEFAULT '[]'")
         if "evidence" not in columns:
             self.db.execute("ALTER TABLE findings ADD COLUMN evidence TEXT NOT NULL DEFAULT '[]'")
+        advisory_columns = {x["name"] for x in self.db.execute("PRAGMA table_info(advisories)")}
+        if "cwe_ids" not in advisory_columns:
+            self.db.execute("ALTER TABLE advisories ADD COLUMN cwe_ids TEXT NOT NULL DEFAULT '[]'")
+        if "cwe_names" not in advisory_columns:
+            self.db.execute("ALTER TABLE advisories ADD COLUMN cwe_names TEXT NOT NULL DEFAULT '{}'")
 
     def save(self, result: Collection) -> None:
         stamp = now()
@@ -429,9 +456,11 @@ class Store:
                     raw = {**raw, "id": matched["id"]}
                 existing = self.db.execute("SELECT * FROM advisories WHERE id=?", (raw["id"],)).fetchone()
                 sources = sorted(set((json.loads(existing["sources"]) if existing else []) + [raw["source"]]))
+                cwe_ids = sorted(set(json.loads(existing["cwe_ids"]) if existing else []) | set(raw.get("cwe_ids") or []))
+                cwe_names = {**(json.loads(existing["cwe_names"]) if existing else {}), **(raw.get("cwe_names") or {})}
                 chosen = raw if not existing or raw["source"] != "OSV" else dict(existing)
-                self.db.execute("INSERT INTO advisories(id,ghsa,cve,published_at,modified_at,first_seen,last_seen,summary,severity,cvss,url,sources) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET ghsa=COALESCE(excluded.ghsa,advisories.ghsa),cve=COALESCE(excluded.cve,advisories.cve),published_at=COALESCE(excluded.published_at,advisories.published_at),modified_at=COALESCE(excluded.modified_at,advisories.modified_at),last_seen=excluded.last_seen,summary=CASE WHEN excluded.summary!='' THEN excluded.summary ELSE advisories.summary END,severity=CASE WHEN excluded.severity!='unknown' THEN excluded.severity ELSE advisories.severity END,cvss=COALESCE(excluded.cvss,advisories.cvss),url=COALESCE(excluded.url,advisories.url),sources=excluded.sources", (raw["id"], raw.get("ghsa"), raw.get("cve"), raw.get("published_at"), raw.get("modified_at"), existing["first_seen"] if existing else stamp, stamp, chosen.get("summary") or "", chosen.get("severity") or "unknown", chosen.get("cvss"), chosen.get("url"), json.dumps(sources)))
-                current = self.db.execute("SELECT ghsa,cve,published_at,modified_at,summary,severity,cvss FROM advisories WHERE id=?", (raw["id"],)).fetchone()
+                self.db.execute("INSERT INTO advisories(id,ghsa,cve,published_at,modified_at,first_seen,last_seen,summary,severity,cvss,cwe_ids,cwe_names,url,sources) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET ghsa=COALESCE(excluded.ghsa,advisories.ghsa),cve=COALESCE(excluded.cve,advisories.cve),published_at=COALESCE(excluded.published_at,advisories.published_at),modified_at=COALESCE(excluded.modified_at,advisories.modified_at),last_seen=excluded.last_seen,summary=CASE WHEN excluded.summary!='' THEN excluded.summary ELSE advisories.summary END,severity=CASE WHEN excluded.severity!='unknown' THEN excluded.severity ELSE advisories.severity END,cvss=COALESCE(excluded.cvss,advisories.cvss),cwe_ids=excluded.cwe_ids,cwe_names=excluded.cwe_names,url=COALESCE(excluded.url,advisories.url),sources=excluded.sources", (raw["id"], raw.get("ghsa"), raw.get("cve"), raw.get("published_at"), raw.get("modified_at"), existing["first_seen"] if existing else stamp, stamp, chosen.get("summary") or "", chosen.get("severity") or "unknown", chosen.get("cvss"), json.dumps(cwe_ids), json.dumps(cwe_names, ensure_ascii=False), chosen.get("url"), json.dumps(sources)))
+                current = self.db.execute("SELECT ghsa,cve,published_at,modified_at,summary,severity,cvss,cwe_ids,cwe_names FROM advisories WHERE id=?", (raw["id"],)).fetchone()
                 fingerprint = hashlib.sha256(json.dumps(dict(current), sort_keys=True).encode()).hexdigest()
                 self.db.execute("INSERT OR IGNORE INTO advisory_observations VALUES(?,?,?,?)", (raw["id"], stamp, current["modified_at"], fingerprint))
                 self.db.execute("INSERT OR IGNORE INTO advisory_repos VALUES(?,?)", (raw["id"], result.repo))
@@ -452,11 +481,12 @@ class Store:
             raise ValueError("저장되지 않은 저장소입니다")
         scope = [x["name"] for x in repositories]
         if not scope:
-            return {"repositories": [], "ranking": [], "packages": [], "timeline": [], "findings": [], "advisory_observations": [], "forecast": {"status": "insufficient_data"}}
+            return {"repositories": [], "ranking": [], "packages": [], "fix_versions": [], "timeline": [], "findings": [], "advisory_observations": [], "forecast": {"status": "insufficient_data"}}
         marks = ",".join("?" for _ in scope)
         ranking = [dict(x) for x in self.db.execute(f"SELECT repo,COUNT(DISTINCT advisory_id) AS advisories FROM advisory_repos WHERE repo IN ({marks}) GROUP BY repo ORDER BY advisories DESC,repo", scope)]
         packages = [dict(x) for x in self.db.execute(f"SELECT repo,ecosystem,name,COUNT(DISTINCT advisory_id) AS advisories FROM advisory_packages WHERE repo IN ({marks}) GROUP BY repo,ecosystem,name ORDER BY advisories DESC,repo,name", scope)]
-        timeline = [dict(x) for x in self.db.execute(f"SELECT a.id,a.ghsa,a.cve,a.published_at AS at,a.modified_at,a.first_seen,a.summary AS title,a.url,a.severity,ar.repo,'advisory' AS kind FROM advisories a JOIN advisory_repos ar ON ar.advisory_id=a.id WHERE ar.repo IN ({marks}) AND a.published_at IS NOT NULL UNION ALL SELECT a.id,a.ghsa,a.cve,a.modified_at AS at,a.modified_at,a.first_seen,a.summary AS title,a.url,a.severity,ar.repo,'advisory_update' AS kind FROM advisories a JOIN advisory_repos ar ON ar.advisory_id=a.id WHERE ar.repo IN ({marks}) AND a.modified_at IS NOT NULL AND a.modified_at!=a.published_at UNION ALL SELECT id,NULL,NULL,at,NULL,first_seen,title,url,NULL,repo,kind FROM events WHERE repo IN ({marks}) ORDER BY at DESC LIMIT ?", [*scope, *scope, *scope, limit])]
+        fix_versions = [dict(x) for x in self.db.execute(f"SELECT advisory_id,repo,ecosystem,name,version_range,patched FROM advisory_packages WHERE repo IN ({marks}) ORDER BY repo,name,advisory_id", scope)]
+        timeline = [dict(x) for x in self.db.execute(f"SELECT a.id,a.ghsa,a.cve,a.published_at AS at,a.modified_at,a.first_seen,a.summary AS title,a.url,a.severity,a.cwe_ids,a.cwe_names,ar.repo,'advisory' AS kind FROM advisories a JOIN advisory_repos ar ON ar.advisory_id=a.id WHERE ar.repo IN ({marks}) AND a.published_at IS NOT NULL UNION ALL SELECT a.id,a.ghsa,a.cve,a.modified_at AS at,a.modified_at,a.first_seen,a.summary AS title,a.url,a.severity,a.cwe_ids,a.cwe_names,ar.repo,'advisory_update' AS kind FROM advisories a JOIN advisory_repos ar ON ar.advisory_id=a.id WHERE ar.repo IN ({marks}) AND a.modified_at IS NOT NULL AND a.modified_at!=a.published_at UNION ALL SELECT id,NULL,NULL,at,NULL,first_seen,title,url,NULL,NULL,NULL,repo,kind FROM events WHERE repo IN ({marks}) ORDER BY at DESC LIMIT ?", [*scope, *scope, *scope, limit])]
         findings = [dict(x) for x in self.db.execute(f"SELECT * FROM findings WHERE repo IN ({marks}) ORDER BY at DESC LIMIT ?", [*scope, limit])]
         publications = [x["published_at"] for x in self.db.execute(f"SELECT DISTINCT a.id,a.published_at FROM advisories a JOIN advisory_repos ar ON ar.advisory_id=a.id WHERE ar.repo IN ({marks}) AND a.published_at IS NOT NULL", scope)]
         for item in repositories:
@@ -466,8 +496,11 @@ class Store:
             item["reasons"] = json.loads(item["reasons"])
             item["paths"] = json.loads(item["paths"])
             item["evidence"] = json.loads(item["evidence"])
+        for item in timeline:
+            item["cwe_ids"] = json.loads(item["cwe_ids"]) if item["cwe_ids"] else []
+            item["cwe_names"] = json.loads(item["cwe_names"]) if item["cwe_names"] else {}
         observations = [dict(x) for x in self.db.execute(f"SELECT ao.advisory_id,ao.observed_at,ao.modified_at,ar.repo FROM advisory_observations ao JOIN advisory_repos ar ON ar.advisory_id=ao.advisory_id WHERE ar.repo IN ({marks}) ORDER BY ao.observed_at DESC LIMIT ?", [*scope, limit])]
-        return {"generated_at": now(), "repositories": repositories, "ranking": ranking, "packages": packages, "timeline": timeline, "findings": findings, "advisory_observations": observations, "forecast": forecast(publications)}
+        return {"generated_at": now(), "repositories": repositories, "ranking": ranking, "packages": packages, "fix_versions": fix_versions, "timeline": timeline, "findings": findings, "advisory_observations": observations, "forecast": forecast(publications)}
 
 
 def synchronize(client: HttpClient, store: Store, repo: str, max_pages: int = 100, max_manifests: int = 100) -> Collection:

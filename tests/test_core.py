@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 import json
+import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -25,6 +26,11 @@ class TimelineTests(unittest.TestCase):
         self.assertEqual(advisory_key({"id": "OSV-1", "aliases": ["CVE-2024-1234", "GHSA-aaaa-bbbb-cccc"]}), "GHSA-aaaa-bbbb-cccc")
         normalized = normalize_advisory({"ghsa_id": "GHSA-aaaa-bbbb-cccc", "vulnerabilities": [{"package": {"ecosystem": "npm", "name": "demo"}, "first_patched_version": "1.2.3"}]}, "GitHub reviewed")
         self.assertEqual(normalized["affected"][0]["patched"], "1.2.3")
+        with_cwe = normalize_advisory({"ghsa_id": "GHSA-aaaa-bbbb-cccc", "cwe_id": "CWE-999", "cwes": [{"cwe_id": "CWE-22"}, {"cwe_id": "CWE-79"}]}, "GitHub reviewed")
+        self.assertEqual(with_cwe["cwe_ids"], ["CWE-22", "CWE-79"])
+        identifiers = normalize_advisory({"ghsa_id": "GHSA-aaaa-bbbb-cccc", "identifiers": [{"type": "CVE", "value": "CVE-2025-1234"}], "cwe_ids": ["CWE-22"]}, "repository")
+        self.assertEqual(identifiers["cve"], "CVE-2025-1234")
+        self.assertEqual(identifiers["cwe_ids"], ["CWE-22"])
 
     def test_candidate_excludes_known_patch_and_docs_only_change(self):
         class FakeClient:
@@ -92,6 +98,21 @@ class TimelineTests(unittest.TestCase):
             self.assertEqual(store.db.execute("SELECT first_seen FROM advisories").fetchone()[0], first)
             self.assertEqual(set(json.loads(store.db.execute("SELECT sources FROM advisories").fetchone()[0])), {"GitHub", "OSV"})
             self.assertEqual(len(report["advisory_observations"]), 1)
+            store.db.close()
+
+    def test_cwe_migration_and_report(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "db.sqlite3"
+            legacy = sqlite3.connect(path)
+            legacy.execute("CREATE TABLE advisories (id TEXT PRIMARY KEY, ghsa TEXT, cve TEXT, published_at TEXT, modified_at TEXT, first_seen TEXT NOT NULL, last_seen TEXT NOT NULL, summary TEXT, severity TEXT, cvss REAL, url TEXT, sources TEXT NOT NULL)")
+            legacy.close()
+            store = Store(path)
+            collection = Collection("example/demo")
+            collection.advisories = [{"id": "GHSA-aaaa-bbbb-cccc", "ghsa": "GHSA-aaaa-bbbb-cccc", "cve": "CVE-2025-1234", "published_at": "2025-01-01T00:00:00Z", "modified_at": None, "summary": "Issue", "severity": "high", "cvss": None, "cwe_ids": ["CWE-22"], "url": None, "source": "GitHub", "affected": []}]
+            store.save(collection)
+            row = next(x for x in store.report()["timeline"] if x["kind"] == "advisory")
+            self.assertEqual(row["cve"], "CVE-2025-1234")
+            self.assertEqual(row["cwe_ids"], ["CWE-22"])
             store.db.close()
 
     def test_forecast_has_explicit_unknown_zero_day_and_data_gate(self):

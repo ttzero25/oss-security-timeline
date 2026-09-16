@@ -8,11 +8,13 @@ GitHub 오픈소스 저장소의 변경과 공개 취약점 공지를 한 시간
 
 - GitHub 릴리스·커밋, 저장소 보안 공지, 패키지별 검토/미검토 GHSA 및 OSV 기록을 수집합니다.
 - CVE/GHSA 별칭을 같은 공지로 묶고, 게시·수정·최초 관측 시각을 저장해 타임라인과 저장소·패키지 순위를 만듭니다.
+- 실험실의 보안 공지 표에는 GHSA/원본 식별자와 등록된 CVE를 별도 칸에 표시하고, 공지 원문에 명시된 CWE 유형만 보여줍니다.
+- 실험실은 공지의 영향 버전과 패치 버전을 비교하고, 공지가 같은 저장소의 커밋을 직접 참조하면 삭제·추가된 코드 줄을 나란히 보여줍니다. 이 참조만으로 해당 커밋이 완전한 fix라고 판정하지 않습니다.
 - 공개 변경 메시지와 Python·JavaScript/TypeScript 코드에서 검토 후보를 찾습니다. 후보는 취약점이나 제로데이 확정 결과가 아닙니다.
 - 완성된 PoC를 정상 입력과 공격 입력으로 비교한 뒤, 코드 경로·영향·기존 공지 중복 여부가 검토된 경우에만 제보 **초안**을 생성합니다. 외부 제출과 CVE/GHSA 번호 부여는 자동으로 하지 않습니다.
-- 로컬 웹에서 타임라인, 에이전트 역할, 코드 조사 현황을 확인할 수 있습니다.
+- 로컬 웹의 Home에서 누적 탐지와 에이전트 역할을, 실험실에서 저장소별 조사 상태를, 정리에서 OSS별 요약을 확인할 수 있습니다.
 
-Python 3.11 이상이 필요합니다. 기본 CLI와 웹 화면에는 추가 Python 패키지가 필요하지 않습니다. 공개 GitHub API도 인증 없이 접근할 수 있지만, 여러 저장소를 반복 수집할 때는 읽기용 `GITHUB_TOKEN`을 권장합니다. PoC의 기본 격리 실행에는 Docker 데몬과 미리 준비된 컨테이너 이미지가 필요합니다.
+Python 3.11 이상이 필요합니다. 기본 CLI와 웹 화면에는 추가 Python 패키지가 필요하지 않습니다. 웹은 `GITHUB_TOKEN`이 없으면 설치·로그인된 GitHub CLI의 인증을 메모리에서만 활용합니다. 어느 쪽도 없으면 비인증 API 한도가 적용되므로 읽기용 토큰을 권장합니다. PoC의 기본 격리 실행에는 Docker 데몬과 미리 준비된 컨테이너 이미지가 필요합니다.
 
 ## 신규 팀원을 위한 빠른 시작
 
@@ -24,15 +26,13 @@ Python 3.11 이상이 필요합니다. 기본 CLI와 웹 화면에는 추가 Pyt
    python3 --version
    ```
 
-2. 읽기용 GitHub 토큰을 환경 변수로 제공하고 샘플 저장소를 한 페이지씩 수집합니다. 이 첫 실행은 동작 확인용으로, 커밋 전수 수집은 아닙니다.
+2. 읽기용 GitHub 토큰을 환경 변수로 제공합니다. 이미 `gh auth login`으로 로그인했다면 웹 실행 시 GitHub CLI 인증을 자동 사용하므로 이 단계는 생략할 수 있습니다. 조사할 공개 저장소 URL은 실험실 화면에서 입력합니다.
 
    ```sh
    export GITHUB_TOKEN=YOUR_READ_ONLY_GITHUB_TOKEN
-   python3 -m oss_timeline sync https://github.com/lodash/lodash --max-pages 1 --max-manifests 10
-   python3 -m oss_timeline report --format html --output data/report.html
    ```
 
-3. 웹 화면을 실행하고 브라우저에서 [http://127.0.0.1:8765/](http://127.0.0.1:8765/)을 엽니다. `/agents`는 역할 구성, `/research`는 코드 조사 현황입니다. 서버는 `127.0.0.1`에만 바인딩하며 읽기 요청만 처리합니다.
+3. 웹 화면을 실행하고 브라우저에서 [http://127.0.0.1:8765/](http://127.0.0.1:8765/)을 엽니다. 실험실에서 `https://github.com/owner/repo` 형식의 링크를 입력하면 공개 공지 수집과 정적 코드 조사를 백그라운드에서 시작합니다. Home은 누적 수치, 정리는 OSS별 결과입니다. 서버는 `127.0.0.1`에만 바인딩합니다.
 
    ```sh
    python3 tools/web.py --port 8765
@@ -44,7 +44,7 @@ Python 3.11 이상이 필요합니다. 기본 CLI와 웹 화면에는 추가 Pyt
    python3 -m unittest discover -s tests
    ```
 
-실제 조사에서는 `--max-pages`와 `--max-manifests`를 필요에 맞게 늘리고, 출력의 `coverage`와 `warnings`를 확인하세요. `python3 -m oss_timeline watch https://github.com/owner/repo --interval-hours 6`으로 정기 관측할 수 있습니다. 운영 중 문제가 생기면 [troubleshooting](troubleshooting/README.md)을 먼저 확인하세요.
+웹은 한 번에 한 저장소를 조사하며 API 페이지와 매니페스트를 각각 최대 100개, 공지 참조 커밋은 최대 5개까지 읽습니다. 조사 완료 뒤 실험실의 수집 범위와 경고를 확인하세요. CWE와 참조 커밋 비교는 새 수집부터 채워지므로 기존 저장소는 다시 수집해야 합니다. 더 세밀한 범위 설정과 정기 관측에는 CLI의 `sync`·`watch`를 사용합니다. 문제가 생기면 [troubleshooting](troubleshooting/README.md)을 먼저 확인하세요.
 
 ## 코드 조사와 제보 흐름
 
@@ -67,7 +67,7 @@ python3 -m oss_timeline disclosure path/to/audit.json FIND-XXXXXXXXXXXX \
 | 위치 | 내용 |
 | --- | --- |
 | [agents](agents/README.md) | 7개 역할별 입력·출력과 실행 흐름 |
-| [tools](tools/README.md) | CLI 안내와 읽기 전용 로컬 웹 도구 |
+| [tools](tools/README.md) | CLI 안내와 로컬 수집·조회 웹 도구 |
 | [rules](rules/README.md) | 코드 탐지, PoC 검증, 비공개 제보 기준 |
 | [troubleshooting](troubleshooting/README.md) | API 제한·Docker·수집 누락 등의 해결 방법 |
 | `oss_timeline/` | 실행 코드와 SQLite 저장·보고서 생성 |
