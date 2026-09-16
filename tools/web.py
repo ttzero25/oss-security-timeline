@@ -6,8 +6,10 @@ import html
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -17,7 +19,7 @@ from urllib.parse import parse_qs, quote, urlparse
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from oss_timeline.core import ApiError, HttpClient, Store, repo_name, synchronize  # noqa: E402
+from oss_timeline.core import ApiError, Collection, HttpClient, Store, repo_name, synchronize  # noqa: E402
 from oss_timeline.fix import collect_reference_diffs  # noqa: E402
 from oss_timeline.research import ResearchOrchestrator, audit, checkout  # noqa: E402
 
@@ -437,7 +439,7 @@ def home(report: dict, stats: dict, audits: list[dict], agents: list[dict]) -> s
 def lab(selected: str | None, report: dict | None, audits: list[dict], job: dict | None, error: str | None, comparisons: dict, fix_year: str = "", fix_month: str = "") -> str:
     value = esc("https://github.com/" + selected) if selected else ""
     capabilities = "".join(f"<span>{esc(label)}</span>" for label in ("명령·코드 실행", "SSRF · 네트워크 스텁", "SQL · DB 스텁", "경로 조작 · scratch", "pickle · stdout 전용", "템플릿 sink · 범위 표시", "C/C++ · ASan/UBSan"))
-    form = f'''<form method="post" action="/lab/start" class="repo-form"><label for="repo">GitHub 오픈소스 저장소</label><div class="input-row"><input id="repo" name="repo" type="url" value="{value}" placeholder="https://github.com/owner/repo" autocomplete="url" required><button class="button" type="submit">수집 · 심층 조사 시작 ↗</button></div><label class="check-option"><input type="checkbox" name="complete_scan" value="1"> 지원 코드 전체를 20,000파일 샤드로 끝까지 조사</label><small>공개 GitHub 저장소만 허용합니다. 지원되는 제한 PoC는 로컬에서 대조하지만 제보는 자동 제출하지 않습니다.</small><div class="capability-list" aria-label="제한 자동 재현 범위">{capabilities}</div></form>'''
+    form = f'''<form method="post" action="/lab/start" class="repo-form"><label for="repo">GitHub 오픈소스 저장소</label><div class="input-row"><input id="repo" name="repo" type="url" value="{value}" placeholder="https://github.com/owner/repo" autocomplete="url" required><button class="button" type="submit">수집 · 심층 조사 시작 ↗</button></div><label class="check-option"><input type="checkbox" name="complete_scan" value="1"> 지원 코드 전체를 20,000파일 샤드로 끝까지 조사</label><small>공개 GitHub 저장소만 허용합니다. 지원되는 제한 PoC는 로컬에서 대조하지만 제보는 자동 제출하지 않습니다.</small><div class="capability-list" aria-label="제한 자동 재현 범위">{capabilities}</div></form><form method="post" action="/lab/self-test" class="self-test-form"><input type="hidden" name="repo" value="fixture/web-self-test"><button type="submit">번들 fixture로 PoC·리포트 self-test</button><small>외부 저장소를 사용하지 않고 무해한 로컬 명령 주입 fixture로 전체 파이프라인을 확인합니다.</small></form>'''
     notice = f'<div class="notice error">{esc(error)}</div>' if error else ""
     running = bool(job and job["status"] == "running")
     if job:
@@ -680,6 +682,39 @@ def serve(port: int, db_path: Path, research_root: Path, registry_path: Path) ->
                 jobs[repo].update(status="failed", step="실패", error=str(exc)[-400:])
                 persist_jobs()
 
+    def run_self_test(repo: str) -> None:
+        try:
+            with lock:
+                jobs[repo]["step"] = "로컬 fixture 체크아웃 준비 중"
+                persist_jobs()
+            checkout_parent = research_root.parent / "checkouts"
+            checkout_parent.mkdir(parents=True, exist_ok=True)
+            root = Path(tempfile.mkdtemp(prefix="web-self-test-", dir=checkout_parent))
+            fixture = ROOT / "tools" / "fixtures" / "web_self_test.py"
+            if not fixture.is_file():
+                raise RuntimeError("번들 self-test fixture를 찾을 수 없습니다")
+            shutil.copy2(fixture, root / "synthetic_app.py")
+            subprocess.run(["git", "init", "-q", str(root)], check=True, timeout=10)
+            subprocess.run(["git", "-C", str(root), "add", "synthetic_app.py"], check=True, timeout=10)
+            subprocess.run(["git", "-C", str(root), "-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "-qm", "web self test"], check=True, timeout=10)
+            store = Store(db_path)
+            try:
+                store.save(Collection(repo))
+            finally:
+                store.db.close()
+            with lock:
+                jobs[repo]["step"] = "fixture 가설·PoC·제보 초안 검증 중"
+                persist_jobs()
+            audit_file = audit(root, repo, research_root, timeline_db=db_path)
+            ResearchOrchestrator().run(audit_file, max_candidates=3, timeline_db=db_path)
+            with lock:
+                jobs[repo].update(status="complete", step="self-test 완료", error="")
+                persist_jobs()
+        except (ValueError, RuntimeError, OSError, KeyError, subprocess.SubprocessError) as exc:
+            with lock:
+                jobs[repo].update(status="failed", step="self-test 실패", error=str(exc)[-400:])
+                persist_jobs()
+
     with lock:
         queued = [repo for repo, job in jobs.items() if job.get("status") == "queued"]
         for repo in queued:
@@ -687,7 +722,7 @@ def serve(port: int, db_path: Path, research_root: Path, registry_path: Path) ->
         if queued:
             persist_jobs()
     for repo in queued:
-        target = run_replay_job if jobs[repo].get("action") == "replay" else run_job
+        target = run_replay_job if jobs[repo].get("action") == "replay" else run_self_test if jobs[repo].get("action") == "self_test" else run_job
         threading.Thread(target=target, args=(repo,), daemon=True).start()
 
     class Handler(BaseHTTPRequestHandler):
@@ -774,7 +809,7 @@ def serve(port: int, db_path: Path, research_root: Path, registry_path: Path) ->
 
         def do_POST(self) -> None:
             action_path = urlparse(self.path).path
-            if action_path not in {"/lab/start", "/lab/replay"}:
+            if action_path not in {"/lab/start", "/lab/replay", "/lab/self-test"}:
                 self.respond("허용되지 않은 요청", status=405)
                 return
             origin = self.headers.get("Origin")
@@ -792,7 +827,7 @@ def serve(port: int, db_path: Path, research_root: Path, registry_path: Path) ->
                 value = fields.get("repo", [""])[0]
                 if action_path == "/lab/start" and not value.startswith("https://github.com/"):
                     raise ValueError("HTTPS GitHub 저장소 링크를 입력하세요")
-                repo = repo_name(value)
+                repo = "fixture/web-self-test" if action_path == "/lab/self-test" else repo_name(value)
                 complete_scan = action_path == "/lab/start" and fields.get("complete_scan", [""])[0] == "1"
             except (ValueError, UnicodeError) as exc:
                 self.respond(page("입력 오류", "lab", empty(str(exc))), status=400)
@@ -801,9 +836,11 @@ def serve(port: int, db_path: Path, research_root: Path, registry_path: Path) ->
                 if any(x["status"] == "running" for x in jobs.values()):
                     self.respond(page("진행 중", "lab", empty("다른 조사가 진행 중입니다. 완료 후 다시 시도하세요.")), status=409)
                     return
-                jobs[repo] = {"repo": repo, "status": "running", "step": "이월 후보 검증 대기 중" if action_path == "/lab/replay" else "조사 대기 중", "started_at": datetime.now(timezone.utc).isoformat(), "attempts": 1, "max_attempts": 3, "resume_on_restart": True, "action": "replay" if action_path == "/lab/replay" else "research", "complete_scan": complete_scan}
+                action = "replay" if action_path == "/lab/replay" else "self_test" if action_path == "/lab/self-test" else "research"
+                step = "이월 후보 검증 대기 중" if action == "replay" else "self-test 대기 중" if action == "self_test" else "조사 대기 중"
+                jobs[repo] = {"repo": repo, "status": "running", "step": step, "started_at": datetime.now(timezone.utc).isoformat(), "attempts": 1, "max_attempts": 3, "resume_on_restart": True, "action": action, "complete_scan": complete_scan}
                 persist_jobs()
-            target = run_replay_job if action_path == "/lab/replay" else run_job
+            target = run_replay_job if action_path == "/lab/replay" else run_self_test if action_path == "/lab/self-test" else run_job
             threading.Thread(target=target, args=(repo,), daemon=True).start()
             self.respond("", status=303, location="/lab?repo=" + quote(repo))
 

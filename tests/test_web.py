@@ -82,6 +82,7 @@ class DashboardTests(unittest.TestCase):
         self.assertIn("SSRF · 네트워크 스텁", rendered)
         self.assertIn("경로 조작 · scratch", rendered)
         self.assertIn('name="complete_scan"', rendered)
+        self.assertIn('action="/lab/self-test"', rendered)
 
     def test_restart_queues_running_job_for_resume(self):
         with tempfile.TemporaryDirectory() as temp:
