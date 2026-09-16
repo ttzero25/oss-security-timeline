@@ -85,6 +85,26 @@ class ResearchTests(unittest.TestCase):
             findings, _ = SourceScanAgent().run(root, "fixture/mutated", "0" * 40)
             self.assertTrue(any(item.kind == "command_injection" for item in findings))
 
+    def test_javascript_scan_traces_imported_esm_functions(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "app.js").write_text('''import { forward } from "./service.js";\nexport function route(req) {\n  const command = req.body.command;\n  return forward(command);\n}\n''', encoding="utf-8")
+            (root / "service.js").write_text('''import { execute } from "./worker.js";\nexport function forward(value) {\n  return execute(value);\n}\n''', encoding="utf-8")
+            (root / "worker.js").write_text('''import { exec } from "child_process";\nexport function execute(command) {\n  return exec(command);\n}\n''', encoding="utf-8")
+            findings, coverage = SourceScanAgent().run(root, "fixture/javascript-multihop", "1" * 40)
+            linked = [item for item in findings if item.function == "route" and item.sink_path == "worker.js"]
+            self.assertEqual(len(linked), 1)
+            self.assertEqual(linked[0].kind, "command_injection")
+            self.assertEqual([step["role"] for step in linked[0].trace], ["source", "call", "call", "sink"])
+            self.assertEqual(coverage["javascript_multihop_files"], 3)
+
+    def test_javascript_scan_keeps_function_scopes_isolated(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "safe.js").write_text('''function read(req) {\n  const value = req.body.value;\n  return value;\n}\nfunction fixed() {\n  return eval("2 + 2");\n}\n''', encoding="utf-8")
+            findings, _ = SourceScanAgent().run(root, "fixture/javascript-scope", "2" * 40)
+            self.assertEqual(findings, [])
+
     def test_repository_profile_records_packages_languages_and_entrypoints(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

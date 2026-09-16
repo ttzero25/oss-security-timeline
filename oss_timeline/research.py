@@ -4,6 +4,7 @@ import ast
 import hashlib
 import json
 import os
+import posixpath
 import re
 import secrets
 import signal
@@ -648,25 +649,165 @@ def _python_multihop_hypotheses(files: list[Path], root: Path, repo: str, commit
     return output
 
 
-def _javascript_hypotheses(filename: Path, root: Path, repo: str, commit: str) -> list[Hypothesis]:
-    try:
-        lines = filename.read_text(encoding="utf-8").splitlines()
-    except (OSError, UnicodeError):
-        return []
-    path = filename.relative_to(root).as_posix()
+def _js_refs(value: str) -> set[str]:
+    return set(re.findall(r"\b[A-Za-z_$][\w$]*\b", re.sub(r"(['\"]).*?\1", "", value)))
+
+
+def _js_function_blocks(lines: list[str]) -> list[dict]:
+    """Extract ordinary named function bodies without pretending to be a full JS parser."""
+    starts = [
+        re.compile(r"\b(?:export\s+)?(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(([^)]*)\)"),
+        re.compile(r"\b(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?\(([^)]*)\)\s*=>"),
+    ]
     output = []
-    recent: list[tuple[int, str, str | None]] = []
-    for number, line in enumerate(lines, 1):
-        if JS_SOURCE.search(line):
-            match = re.search(r"\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=", line)
-            recent.append((number, line, match.group(1) if match else None))
-        recent = [x for x in recent if number - x[0] <= 40]
-        for kind, sink in JS_SINKS:
-            if not sink.search(line):
+    for index, line in enumerate(lines):
+        match = None
+        for candidate in starts:
+            match = candidate.search(line)
+            if match:
+                break
+        if not match or "{" not in line[match.end():]:
+            continue
+        depth = 0
+        end = index
+        for cursor in range(index, len(lines)):
+            code = re.sub(r"(['\"])(?:\\.|(?!\1).)*\1", "", lines[cursor].split("//", 1)[0])
+            depth += code.count("{") - code.count("}")
+            end = cursor
+            if depth <= 0:
+                break
+        parameters = []
+        for raw in match.group(2).split(","):
+            name = re.match(r"\s*([A-Za-z_$][\w$]*)", raw)
+            if name:
+                parameters.append(name.group(1))
+        output.append({"name": match.group(1), "parameters": parameters, "start": index, "end": end})
+    return output
+
+
+def _js_module_name(path: Path, root: Path) -> str:
+    return path.relative_to(root).with_suffix("").as_posix()
+
+
+def _javascript_multihop_hypotheses(files: list[Path], root: Path, repo: str, commit: str, max_depth: int = 4) -> list[Hypothesis]:
+    """Trace a bounded subset of ESM/CommonJS calls with function-local taint."""
+    modules: dict[str, dict] = {}
+    functions: dict[str, dict] = {}
+    available_modules = {_js_module_name(item, root) for item in files}
+    for filename in files:
+        try:
+            lines = filename.read_text(encoding="utf-8").splitlines()
+        except (OSError, UnicodeError):
+            continue
+        module = _js_module_name(filename, root)
+        imports: dict[str, tuple[str, str | None]] = {}
+
+        def target_module(specifier: str) -> str | None:
+            if not specifier.startswith("."):
+                return None
+            resolved = posixpath.normpath(posixpath.join(posixpath.dirname(module), specifier))
+            if posixpath.splitext(resolved)[1] in {".js", ".mjs", ".cjs", ".ts", ".mts", ".cts"}:
+                resolved = posixpath.splitext(resolved)[0]
+            if resolved in available_modules:
+                return resolved
+            index = posixpath.join(resolved, "index")
+            return index if index in available_modules else resolved
+
+        for line in lines:
+            named = re.search(r"\bimport\s*\{([^}]+)\}\s*from\s*['\"]([^'\"]+)['\"]", line)
+            if named and (target := target_module(named.group(2))):
+                for item in named.group(1).split(","):
+                    parts = re.split(r"\s+as\s+", item.strip())
+                    if parts and parts[0]:
+                        imports[parts[-1]] = (target, parts[0])
+            namespace = re.search(r"\bimport\s+\*\s+as\s+([\w$]+)\s+from\s*['\"]([^'\"]+)['\"]", line)
+            if namespace and (target := target_module(namespace.group(2))):
+                imports[namespace.group(1)] = (target, None)
+            common_named = re.search(r"\b(?:const|let|var)\s*\{([^}]+)\}\s*=\s*require\s*\(\s*['\"]([^'\"]+)['\"]", line)
+            if common_named and (target := target_module(common_named.group(2))):
+                for item in common_named.group(1).split(","):
+                    parts = re.split(r"\s*:\s*", item.strip())
+                    if parts and parts[0]:
+                        imports[parts[-1]] = (target, parts[0])
+            common_namespace = re.search(r"\b(?:const|let|var)\s+([\w$]+)\s*=\s*require\s*\(\s*['\"]([^'\"]+)['\"]", line)
+            if common_namespace and (target := target_module(common_namespace.group(2))):
+                imports[common_namespace.group(1)] = (target, None)
+        modules[module] = {"path": filename.relative_to(root).as_posix(), "lines": lines, "imports": imports}
+        for block in _js_function_blocks(lines):
+            functions[f'{module}:{block["name"]}'] = {**modules[module], **block, "module": module}
+
+    def resolve(info: dict, name: str) -> str | None:
+        if "." in name:
+            head, tail = name.split(".", 1)
+            imported = info["imports"].get(head)
+            return f"{imported[0]}:{tail}" if imported and imported[1] is None else None
+        imported = info["imports"].get(name)
+        if imported and imported[1]:
+            return f"{imported[0]}:{imported[1]}"
+        local = f'{info["module"]}:{name}'
+        return local if local in functions else None
+
+    def analyze(info: dict) -> tuple[dict[str, tuple[str, int, str]], list[dict], list[dict]]:
+        origins = {name: (name, info["start"] + 1, info["lines"][info["start"]]) for name in info["parameters"]}
+        sinks, calls = [], []
+        for offset in range(info["start"], info["end"] + 1):
+            line, number = info["lines"][offset], offset + 1
+            assignment = re.search(r"\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(.+)", line)
+            if assignment:
+                value = assignment.group(2)
+                if JS_SOURCE.search(value):
+                    origins[assignment.group(1)] = ("__external__", number, line)
+                else:
+                    inherited = next((origins[name] for name in _js_refs(value) if name in origins), None)
+                    if inherited:
+                        origins[assignment.group(1)] = inherited
+            for kind, pattern in JS_SINKS:
+                match = pattern.search(line)
+                if match:
+                    argument = line[match.end():]
+                    origin = ("__external__", number, line) if JS_SOURCE.search(argument) else next((origins[name] for name in _js_refs(argument) if name in origins), None)
+                    if origin:
+                        sinks.append({"parameter": origin[0], "source_line": origin[1], "source_code": origin[2], "kind": kind, "sink_line": number, "sink_code": line, "sink_path": info["path"], "trace": [{"role": "sink", "path": info["path"], "line": number, "function": info["name"], "code": line.strip()[:240]}]})
+            for call in re.finditer(r"\b([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?)\s*\(([^;]*)\)", line):
+                callee = resolve(info, call.group(1))
+                if callee and callee != f'{info["module"]}:{info["name"]}':
+                    calls.append({"callee": callee, "arguments": [item.strip() for item in call.group(2).split(",")], "line": number, "code": line})
+        return origins, sinks, calls
+
+    analyzed = {key: analyze(info) for key, info in functions.items()}
+    summaries = {key: list(value[1]) for key, value in analyzed.items()}
+    for _ in range(max_depth):
+        changed = False
+        for key, info in functions.items():
+            origins, _, calls = analyzed[key]
+            for call in calls:
+                if call["callee"] not in functions:
+                    continue
+                parameters = functions[call["callee"]]["parameters"]
+                supplied = {parameters[index]: value for index, value in enumerate(call["arguments"]) if index < len(parameters)}
+                for downstream in summaries[call["callee"]]:
+                    argument = supplied.get(downstream["parameter"])
+                    if argument is None:
+                        continue
+                    origin = ("__external__", call["line"], call["code"]) if JS_SOURCE.search(argument) else next((origins[name] for name in _js_refs(argument) if name in origins), None)
+                    if not origin:
+                        continue
+                    propagated = {**downstream, "parameter": origin[0], "source_line": origin[1], "source_code": origin[2], "trace": [{"role": "call", "path": info["path"], "line": call["line"], "function": info["name"], "callee": call["callee"], "code": call["code"].strip()[:240]}, *downstream["trace"]]}
+                    identity = (propagated["parameter"], propagated["kind"], propagated["sink_path"], propagated["sink_line"], tuple(step.get("callee") for step in propagated["trace"]))
+                    existing = {(item["parameter"], item["kind"], item["sink_path"], item["sink_line"], tuple(step.get("callee") for step in item["trace"])) for item in summaries[key]}
+                    if identity not in existing:
+                        summaries[key].append(propagated)
+                        changed = True
+        if not changed:
+            break
+
+    output = []
+    for key, info in functions.items():
+        for finding in summaries[key]:
+            if finding["parameter"] != "__external__":
                 continue
-            source = next((x for x in reversed(recent) if JS_SOURCE.search(line) or x[2] and re.search(r"\b" + re.escape(x[2]) + r"\b", line)), None)
-            if source:
-                output.append(_hypothesis(repo, commit, kind, path, source[0], number, source[1], line, "javascript_scope_unknown"))
+            trace = [{"role": "source", "path": info["path"], "line": finding["source_line"], "function": info["name"], "code": finding["source_code"].strip()[:240]}, *finding["trace"]]
+            output.append(_hypothesis(repo, commit, finding["kind"], info["path"], finding["source_line"], finding["sink_line"], finding["source_code"], finding["sink_code"], info["name"], source_path=info["path"], sink_path=finding["sink_path"], entry_kind="modeled_request", trace=trace))
     return output
 
 
@@ -724,6 +865,7 @@ class SourceScanAgent:
             raise ValueError("조사 대상 디렉터리가 없습니다")
         output: list[Hypothesis] = []
         python_files: list[Path] = []
+        javascript_files: list[Path] = []
         inspected = 0
         truncated = False
         for filename in root.rglob("*"):
@@ -745,10 +887,12 @@ class SourceScanAgent:
             elif filename.suffix in C_EXTENSIONS:
                 output.extend(_c_hypotheses(filename, root, repo, commit))
             else:
-                output.extend(_javascript_hypotheses(filename, root, repo, commit))
+                javascript_files.append(filename)
         multihop_limit = min(len(python_files), 5_000)
+        javascript_limit = min(len(javascript_files), 5_000)
         output.extend(_python_multihop_hypotheses(python_files[:multihop_limit], root, repo, commit))
-        return sorted({x.id: x for x in output}.values(), key=lambda x: (x.path, x.sink_line)), {"files_inspected": min(inspected, max_files), "truncated": truncated, "languages": ["python", "javascript/typescript", "c/c++"], "python_multihop_files": multihop_limit, "python_multihop_truncated": len(python_files) > multihop_limit}
+        output.extend(_javascript_multihop_hypotheses(javascript_files[:javascript_limit], root, repo, commit))
+        return sorted({x.id: x for x in output}.values(), key=lambda x: (x.path, x.sink_line)), {"files_inspected": min(inspected, max_files), "truncated": truncated, "languages": ["python", "javascript/typescript", "c/c++"], "python_multihop_files": multihop_limit, "python_multihop_truncated": len(python_files) > multihop_limit, "javascript_multihop_files": javascript_limit, "javascript_multihop_truncated": len(javascript_files) > javascript_limit}
 
 
 class SemanticAnalysisAgent:
