@@ -1962,8 +1962,29 @@ if (result !== undefined) console.log(Buffer.isBuffer(result) ? result.toString(
         except (OSError, UnicodeError, SyntaxError) as exc:
             raise ValueError("PoC 대상 Python 파일을 다시 분석할 수 없습니다") from exc
         top_level = [node for node in syntax.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == finding["function"]]
+        target_owner = ""
+        if not top_level and kind in {"command_injection", "code_execution"}:
+            class_targets = []
+            for class_node in (node for node in syntax.body if isinstance(node, ast.ClassDef)):
+                methods = [node for node in class_node.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))]
+                target_methods = [node for node in methods if node.name == finding["function"]]
+                inert_body = all(
+                    isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Pass))
+                    or isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str)
+                    or isinstance(node, (ast.Assign, ast.AnnAssign)) and isinstance(node.value, ast.Constant)
+                    for node in class_node.body
+                )
+                zero_arg_init = not any(node.name == "__init__" and len([*node.args.posonlyargs, *node.args.args]) > 1 for node in methods)
+                if len(target_methods) == 1 and not class_node.bases and not class_node.keywords and not class_node.decorator_list and inert_body and zero_arg_init:
+                    class_targets.append((class_node, target_methods[0]))
+            if len(class_targets) == 1:
+                owner, target = class_targets[0]
+                target_owner = owner.name
+                top_level = [target]
         if len(top_level) != 1:
-            raise ValueError("자동 PoC는 모듈 최상위 함수만 호출합니다")
+            raise ValueError("자동 PoC는 모듈 최상위 함수 또는 부작용 없는 무인자 클래스 메서드만 호출합니다")
+        if target_owner and kind not in {"command_injection", "code_execution"}:
+            raise ValueError("클래스 메서드 자동 PoC는 명령·코드 실행 후보로 제한됩니다")
         proof = destination / "proof.py"
         if proof.exists():
             raise ValueError("기존 PoC 작업물이 있어 자동 생성으로 덮어쓰지 않습니다")
@@ -2410,7 +2431,9 @@ def drive(case):
     spec = importlib.util.spec_from_file_location("oss_target", target_path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    target = getattr(module, {finding["function"]!r})
+    owner_name = {target_owner!r}
+    owner = getattr(module, owner_name)() if owner_name else module
+    target = getattr(owner, {finding["function"]!r})
     arguments = []
     for parameter in inspect.signature(target).parameters.values():
         arguments.append(InputProxy(value) if parameter.name.lower() in {{"request", "req"}} else value)
@@ -2424,7 +2447,7 @@ def drive(case):
 if __name__ == "__main__":
     drive(sys.argv[1])
 '''
-        manifest = {"finding_id": finding["id"], "repo_path": audit_data["checkout"], "commit": audit_data["commit"], "image": environment["image"], "proof_file": "proof.py", "attack": ["python3", "proof.py", "attack"], "control": ["python3", "proof.py", "control"], "observable": {"type": "stdout_contains", "value": marker}, "timeout_seconds": 30, "generator": "bounded_python_v1", "async_policy": "await_if_needed"}
+        manifest = {"finding_id": finding["id"], "repo_path": audit_data["checkout"], "commit": audit_data["commit"], "image": environment["image"], "proof_file": "proof.py", "attack": ["python3", "proof.py", "attack"], "control": ["python3", "proof.py", "control"], "observable": {"type": "stdout_contains", "value": marker}, "timeout_seconds": 30, "generator": "bounded_python_v1", "async_policy": "await_if_needed", "target_owner": target_owner or None}
         proof.write_text(script, encoding="utf-8")
         manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
         return manifest_path

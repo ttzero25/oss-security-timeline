@@ -499,6 +499,24 @@ print(result.stdout)
             evidence = json.loads(PocValidatorAgent().run(manifest_file).read_text())
             self.assertEqual(evidence["mechanical_result"], "contrast_matched")
 
+    def test_python_limited_poc_calls_inert_zero_argument_class_method(self):
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)
+            repo = folder / "repo"
+            repo.mkdir()
+            (repo / "runner.py").write_text('''import subprocess\n\nclass Runner:\n    def run(self, command):\n        return subprocess.run(command, shell=True, capture_output=True, text=True)\n''', encoding="utf-8")
+            subprocess.run(["git", "init", "-q", str(repo)], check=True)
+            subprocess.run(["git", "-C", str(repo), "add", "runner.py"], check=True)
+            subprocess.run(["git", "-C", str(repo), "-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "-qm", "fixture"], check=True)
+            audit_file = audit(repo, "fixture/python-class-poc", folder / "research")
+            audit_data = json.loads(audit_file.read_text())
+            finding = next(item for item in SemanticAnalysisAgent().run(audit_data["hypotheses"], audit_data["profile"]) if item["kind"] == "command_injection")
+            manifest_file = LimitedPocAgent().run(audit_file, finding, BuildEnvironmentAgent().run(repo, finding))
+            manifest = json.loads(manifest_file.read_text())
+            self.assertEqual(manifest["target_owner"], "Runner")
+            evidence = json.loads(PocValidatorAgent().run(manifest_file).read_text())
+            self.assertEqual(evidence["mechanical_result"], "contrast_matched")
+
     def test_python_ssrf_poc_stubs_network_and_runs_real_function(self):
         with tempfile.TemporaryDirectory() as temp:
             folder = Path(temp)
