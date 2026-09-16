@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -31,8 +32,18 @@ def run_benchmark(manifest_file: Path, output_file: Path | None = None) -> dict:
         if not case_id or case_id in seen_ids or expectation not in {"vulnerable", "clean"} or origin not in {"synthetic", "historical"}:
             raise ValueError("벤치마크 사례 ID 또는 expectation이 올바르지 않습니다")
         provenance = raw.get("provenance") or {}
-        if origin == "historical" and (not raw.get("pair_id") or any(not provenance.get(key) for key in ("advisory", "repository", "ref", "source_path", "snapshot_type"))):
-            raise ValueError(f"{case_id}: 실제 공개 사례에는 pair_id와 provenance가 필요합니다")
+        if origin == "historical":
+            required = ("advisory", "repository", "ref", "source_path", "snapshot_type", "url")
+            if not raw.get("pair_id") or any(not provenance.get(key) for key in required):
+                raise ValueError(f"{case_id}: 실제 공개 사례에는 pair_id와 provenance가 필요합니다")
+            if not re.fullmatch(r"GHSA-[23456789cfghjmpqrvwxy]{4}-[23456789cfghjmpqrvwxy]{4}-[23456789cfghjmpqrvwxy]{4}", str(provenance["advisory"])):
+                raise ValueError(f"{case_id}: GHSA 식별자가 올바르지 않습니다")
+            if not re.fullmatch(r"[^/\s]+/[^/\s]+", str(provenance["repository"])):
+                raise ValueError(f"{case_id}: 저장소 식별자가 올바르지 않습니다")
+            if not re.search(r"[0-9a-f]{40}", str(provenance["ref"])):
+                raise ValueError(f"{case_id}: provenance ref에는 불변 커밋 SHA가 필요합니다")
+            if not str(provenance["url"]).startswith("https://github.com/"):
+                raise ValueError(f"{case_id}: provenance URL은 GitHub 원본이어야 합니다")
         if expectation == "vulnerable" and not expected_kinds:
             raise ValueError(f"{case_id}: 취약 사례에는 expected_kinds가 필요합니다")
         seen_ids.add(case_id)
@@ -83,7 +94,13 @@ def run_benchmark(manifest_file: Path, output_file: Path | None = None) -> dict:
     for case in cases:
         if case["origin"] == "historical":
             historical_pairs.setdefault(case["pair_id"], []).append(case)
-    complete_pairs = [pair for pair in historical_pairs.values() if {case["expectation"] for case in pair} == {"vulnerable", "clean"}]
+    for pair_id, pair in historical_pairs.items():
+        if len(pair) != 2 or {case["expectation"] for case in pair} != {"vulnerable", "clean"}:
+            raise ValueError(f"{pair_id}: 공개 사례는 취약/수정 사례가 정확히 하나씩 필요합니다")
+        identities = {(case["provenance"]["advisory"], case["provenance"]["repository"]) for case in pair}
+        if len(identities) != 1:
+            raise ValueError(f"{pair_id}: 취약/수정 사례의 advisory와 repository가 일치해야 합니다")
+    complete_pairs = list(historical_pairs.values())
     metrics = {
         "total_cases": len(cases),
         "vulnerable_cases": len(vulnerable),

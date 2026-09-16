@@ -31,7 +31,7 @@ class BenchmarkTests(unittest.TestCase):
 
     def test_default_corpus_passes_after_known_semantic_fixes(self):
         result = run_benchmark(Path("benchmarks/corpus.json"))
-        self.assertEqual(result["metrics"]["total_cases"], 23)
+        self.assertEqual(result["metrics"]["total_cases"], 27)
         self.assertEqual(result["metrics"]["false_negative_cases"], 0)
         self.assertEqual(result["metrics"]["false_positive_cases"], 0)
         allowlist = next(case for case in result["cases"] if case["id"] == "python-allowlist-command")
@@ -40,8 +40,8 @@ class BenchmarkTests(unittest.TestCase):
         method_dispatch = next(case for case in result["cases"] if case["id"] == "python-method-multihop")
         self.assertTrue(method_dispatch["passed"])
         self.assertIn("command_injection", method_dispatch["found_kinds"])
-        self.assertEqual(result["metrics"]["by_origin"]["historical"], {"cases": 2, "passed": 2, "pass_rate": 1.0})
-        self.assertEqual(result["metrics"]["historical_pairs_passed"], 1)
+        self.assertEqual(result["metrics"]["by_origin"]["historical"], {"cases": 6, "passed": 6, "pass_rate": 1.0})
+        self.assertEqual(result["metrics"]["historical_pairs_passed"], 3)
 
     def test_cli_threshold_can_fail_a_regression_gate(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -56,6 +56,18 @@ class BenchmarkTests(unittest.TestCase):
                 code = main(["benchmark", "--corpus", str(corpus), "--output", str(output), "--max-false-positive-cases", "0"])
             self.assertEqual(code, 2)
             self.assertTrue(output.is_file())
+
+    def test_historical_case_requires_a_complete_consistent_pair(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            case = root / "case"
+            case.mkdir()
+            (case / "app.py").write_text("def safe(): return True\n", encoding="utf-8")
+            provenance = {"advisory": "GHSA-5w57-2ccq-8w95", "repository": "owner/repo", "ref": "a" * 40, "source_path": "app.py", "snapshot_type": "focused_excerpt", "url": "https://github.com/owner/repo/blob/" + "a" * 40 + "/app.py"}
+            manifest = root / "corpus.json"
+            manifest.write_text(json.dumps({"schema_version": 1, "cases": [{"id": "only-fixed", "path": "case", "origin": "historical", "pair_id": "CVE-2099-1", "expectation": "clean", "expected_kinds": [], "provenance": provenance}]}), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "정확히 하나씩"):
+                run_benchmark(manifest)
 
 
 if __name__ == "__main__":

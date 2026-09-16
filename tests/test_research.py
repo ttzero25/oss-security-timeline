@@ -71,6 +71,16 @@ class ResearchTests(unittest.TestCase):
             self.assertEqual(len(linked), 1)
             self.assertTrue(any(step.get("callee") == "worker:Worker.execute" for step in linked[0].trace))
 
+    def test_python_scan_models_named_public_api_input(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "decoder.py").write_text('''import pickle\n\nclass Decoder:\n    def parse(self, params):\n        return self._decode(params["payload"])\n\n    def _decode(self, value):\n        return pickle.loads(value)\n''', encoding="utf-8")
+            findings, _ = SourceScanAgent().run(root, "fixture/public-api", "7" * 40)
+            linked = [item for item in findings if item.function == "parse"]
+            self.assertEqual(len(linked), 1)
+            self.assertEqual(linked[0].kind, "unsafe_deserialization")
+            self.assertEqual(linked[0].entry_kind, "modeled_public_api")
+
     def test_python_scan_treats_immutable_literal_allowlist_as_sanitizer(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -135,6 +145,16 @@ class ResearchTests(unittest.TestCase):
             (root / "main.go").write_text('''package main\nimport ("net/http"; "os/exec")\nfunc handler(w http.ResponseWriter, r *http.Request) {\n    name := r.FormValue("name")\n    exec.Command("printf", "%s", name).Run()\n}\n''', encoding="utf-8")
             findings, _ = SourceScanAgent().run(root, "fixture/go-safe", "4" * 40)
             self.assertEqual(findings, [])
+
+    def test_go_scan_models_rpc_request_parameters(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "rpc.go").write_text('''package main\nimport "os/exec"\ntype RunRequest struct { Command string }\nfunc execute(command string) {\n    exec.Command("sh", "-c", command).Run()\n}\nfunc Run(opts *RunRequest) {\n    execute(opts.Command)\n}\n''', encoding="utf-8")
+            findings, _ = SourceScanAgent().run(root, "fixture/go-rpc", "8" * 40)
+            linked = [item for item in findings if item.function == "Run"]
+            self.assertEqual(len(linked), 1)
+            self.assertEqual(linked[0].kind, "command_injection")
+            self.assertEqual(linked[0].entry_kind, "modeled_request")
 
     def test_repository_profile_records_packages_languages_and_entrypoints(self):
         with tempfile.TemporaryDirectory() as temp:

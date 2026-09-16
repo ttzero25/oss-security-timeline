@@ -31,6 +31,7 @@ JS_SINKS = [
     ("path_traversal", re.compile(r"\bfs\.(?:readFile|readFileSync|writeFile|writeFileSync|createReadStream|createWriteStream)\s*\(")),
 ]
 GO_SOURCE = re.compile(r"\b(?:r\.(?:FormValue|PostFormValue)\s*\(|r\.URL\.Query\(\)\.Get\s*\(|r\.Header\.Get\s*\(|(?:c|ctx)\.(?:Query|Param|PostForm|FormValue)\s*\(|os\.Args\s*\[|flag\.Arg\s*\(|os\.Getenv\s*\()")
+PUBLIC_INPUT_NAMES = {"args", "body", "command", "content", "data", "filename", "input", "params", "path", "payload", "query", "url"}
 C_EXTENSIONS = {".c", ".h", ".cc", ".cpp", ".cxx", ".hpp"}
 C_RETURN_SOURCE = re.compile(r"\b(?:getenv|getopt|getopt_long)\s*\(|\bargv\s*\[")
 C_BUFFER_SOURCE = re.compile(r"\b(?:recv|recvfrom|read|fgets|gets|scanf|sscanf)\s*\(")
@@ -633,6 +634,10 @@ def _python_multihop_hypotheses(files: list[Path], root: Path, repo: str, commit
             for parameter in parameters:
                 if parameter not in {"self", "cls", "request"}:
                     external[parameter] = (node.lineno, info["lines"][node.lineno - 1], "http_route")
+        elif not node.name.startswith("_"):
+            for parameter in parameters:
+                if parameter.lower() in PUBLIC_INPUT_NAMES:
+                    external[parameter] = (node.lineno, info["lines"][node.lineno - 1], "modeled_public_api")
         for call in (child for child in ast.walk(node) if isinstance(child, ast.Call)):
             callee = resolve_callee(info, call)
             if not callee or callee not in summaries:
@@ -660,8 +665,8 @@ def _python_multihop_hypotheses(files: list[Path], root: Path, repo: str, commit
     return output
 
 
-def _js_refs(value: str) -> set[str]:
-    return set(re.findall(r"\b[A-Za-z_$][\w$]*\b", re.sub(r"(['\"]).*?\1", "", value)))
+def _js_refs(value: str) -> list[str]:
+    return list(dict.fromkeys(re.findall(r"\b[A-Za-z_$][\w$]*\b", re.sub(r"(['\"]).*?\1", "", value))))
 
 
 def _js_function_blocks(lines: list[str]) -> list[dict]:
@@ -855,6 +860,7 @@ def _go_function_blocks(lines: list[str]) -> list[dict]:
             if depth <= 0:
                 break
         parameters = []
+        external_parameters = []
         pending = []
         for raw in match.group(2).split(","):
             parts = raw.strip().split()
@@ -862,15 +868,18 @@ def _go_function_blocks(lines: list[str]) -> list[dict]:
                 pending.append(parts[0])
             elif len(parts) >= 2:
                 parameters.extend(pending)
+                if re.search(r"(?:^|[.*])(?:[A-Za-z_]\w*)?Request$", parts[-1]):
+                    external_parameters.extend(pending)
+                    external_parameters.append(parts[0])
                 pending = []
                 parameters.append(parts[0])
-        output.append({"name": match.group(1), "parameters": parameters, "start": index, "end": end})
+        output.append({"name": match.group(1), "parameters": parameters, "external_parameters": external_parameters, "start": index, "end": end})
     return output
 
 
-def _go_refs(value: str) -> set[str]:
+def _go_refs(value: str) -> list[str]:
     without_literals = re.sub(r'`[^`]*`|"(?:\\.|[^"\\])*"', "", value)
-    return set(re.findall(r"\b[A-Za-z_]\w*\b", without_literals))
+    return list(dict.fromkeys(re.findall(r"\b[A-Za-z_]\w*\b", without_literals)))
 
 
 def _go_arguments(value: str) -> list[str]:
@@ -980,7 +989,8 @@ def _go_multihop_hypotheses(files: list[Path], root: Path, repo: str, commit: st
         return None
 
     def analyze(info: dict) -> tuple[dict[str, tuple[str, int, str]], list[dict], list[dict]]:
-        origins = {name: (name, info["start"] + 1, info["lines"][info["start"]]) for name in info["parameters"]}
+        external = set(info.get("external_parameters", []))
+        origins = {name: ("__external__" if name in external else name, info["start"] + 1, info["lines"][info["start"]]) for name in info["parameters"]}
         sinks, calls = [], []
         for offset in range(info["start"], info["end"] + 1):
             line, number = info["lines"][offset], offset + 1
