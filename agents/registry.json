@@ -1,0 +1,9 @@
+[
+  {"name":"InventoryAgent","lane":"timeline","purpose":"Detect distributable packages from repository manifests","code":"oss_timeline/core.py"},
+  {"name":"ChangeAgent","lane":"timeline","purpose":"Collect releases and commits","code":"oss_timeline/core.py"},
+  {"name":"AdvisoryAgent","lane":"timeline","purpose":"Collect repository, GitHub and OSV advisories","code":"oss_timeline/core.py"},
+  {"name":"CandidateAgent","lane":"timeline","purpose":"Triage public security-related changes for review","code":"oss_timeline/core.py"},
+  {"name":"SourceScanAgent","lane":"research","purpose":"Find source-to-sink hypotheses in a checkout","code":"oss_timeline/research.py"},
+  {"name":"PocValidatorAgent","lane":"research","purpose":"Compare benign and attack PoC observations","code":"oss_timeline/research.py"},
+  {"name":"DisclosureAgent","lane":"research","purpose":"Generate evidence-backed private GHSA and CVE drafts","code":"oss_timeline/research.py"}
+]
