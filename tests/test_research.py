@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 
 from oss_timeline.core import Collection, Store
-from oss_timeline.research import BuildEnvironmentAgent, DisclosureAgent, DuplicateReviewAgent, LimitedPocAgent, PocValidatorAgent, RepositoryProfilerAgent, ResearchOrchestrator, SemanticAnalysisAgent, SourceScanAgent, audit, claim_template, prepare_poc
+from oss_timeline.research import BuildEnvironmentAgent, DisclosureAgent, DuplicateReviewAgent, LimitedPocAgent, PocValidatorAgent, RepositoryProfilerAgent, ResearchOrchestrator, SemanticAnalysisAgent, SourceScanAgent, audit, claim_template, mark_submission_status, prepare_poc, submission_status
 
 
 FIXTURE = Path(__file__).parent / "fixtures" / "synthetic_app.py"
@@ -211,7 +211,7 @@ print(result.stdout)
             evidence_file = PocValidatorAgent().run(poc_dir / "manifest.json")
             evidence = json.loads(evidence_file.read_text())
             self.assertEqual(evidence["mechanical_result"], "contrast_matched")
-            self.assertEqual(evidence["mode"], "limited_process")
+            self.assertIn(evidence["mode"], {"limited_process", "macos_sandbox"})
             self.assertFalse(evidence["control_observable"])
             claim = claim_template(finding)
             with self.assertRaises(ValueError):
@@ -235,6 +235,33 @@ print(result.stdout)
             (poc_dir / "proof.py").write_text(proof + "\n# changed after verification\n")
             with self.assertRaisesRegex(ValueError, "변경"):
                 DisclosureAgent().run(audit_file, finding["id"], claim_file, evidence_file)
+            tampered = json.loads((poc_dir / "manifest.json").read_text())
+            tampered["attack"] = ["sh", "-c", "id"]
+            (poc_dir / "manifest.json").write_text(json.dumps(tampered), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "실행 명령"):
+                PocValidatorAgent().run(poc_dir / "manifest.json")
+
+    def test_manual_submission_state_requires_order_and_reference(self):
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)
+            finding_id = "FIND-MANUAL00001"
+            audit_file = folder / "audit.json"
+            audit_file.write_text(json.dumps({"commit": "a" * 40, "hypotheses": [{"id": finding_id}]}), encoding="utf-8")
+            report = folder / finding_id
+            report.mkdir()
+            (report / "GHSA_CANDIDATE.md").write_text("# draft", encoding="utf-8")
+            (report / "CVE_REQUEST_BRIEF.md").write_text("# brief", encoding="utf-8")
+            self.assertEqual(submission_status(audit_file, finding_id)["status"], "draft_ready")
+            mark_submission_status(audit_file, finding_id, "reviewed", note="Reviewed locally")
+            with self.assertRaisesRegex(ValueError, "외부 참조"):
+                mark_submission_status(audit_file, finding_id, "submitted")
+            state_file = mark_submission_status(audit_file, finding_id, "submitted", "https://github.com/example/demo/security/advisories/1")
+            state = json.loads(state_file.read_text())
+            self.assertEqual(state["status"], "submitted")
+            self.assertEqual(state["external_action"], "recorded_only")
+            self.assertEqual([item["to"] for item in state["history"]], ["reviewed", "submitted"])
+            with self.assertRaisesRegex(ValueError, "상태 전환"):
+                mark_submission_status(audit_file, finding_id, "reviewed")
 
     def test_javascript_limited_poc_runs_real_default_export_with_contrast(self):
         with tempfile.TemporaryDirectory() as temp:

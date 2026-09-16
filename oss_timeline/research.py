@@ -1560,10 +1560,25 @@ class PocValidatorAgent:
 
     def _run(self, command: list[str], manifest: dict, poc_dir: Path, scratch: Path, container: bool) -> dict:
         repo = Path(manifest["repo_path"]).resolve()
+        isolation = "container" if container else "resource_limits"
         if not container:
             args = command
+            scratch = scratch.resolve()
             env = {key: os.environ[key] for key in ("PATH", "LANG", "LC_ALL", "SYSTEMROOT") if os.environ.get(key)}
             env.update({"OSS_POC_REPO": str(repo), "OSS_POC_SCRATCH": str(scratch), "TMPDIR": str(scratch), "PYTHONDONTWRITEBYTECODE": "1"})
+            sandbox = shutil.which("sandbox-exec") if sys.platform == "darwin" else None
+            if sandbox:
+                escaped_scratch = str(scratch).replace("\\", "\\\\").replace('"', '\\"')
+                profile = scratch / "sandbox.sb"
+                profile.write_text(f'''(version 1)
+(allow default)
+(deny network*)
+(deny file-write*)
+(allow file-write* (subpath "{escaped_scratch}"))
+(allow file-write* (literal "/dev/null"))
+''', encoding="utf-8")
+                args = [sandbox, "-f", str(profile), *command]
+                isolation = "macos_sandbox_no_network"
         else:
             image = manifest.get("image", "python:3.11-slim")
             if not re.fullmatch(r"[A-Za-z0-9_./:-]+", image):
@@ -1571,10 +1586,10 @@ class PocValidatorAgent:
             args = ["docker", "run", "--rm", "--pull=never", "--network=none", "--read-only", "--pids-limit=64", "--memory=256m", "--cpus=1", "--security-opt", "no-new-privileges", "-v", f"{repo}:/repo:ro", "-v", f"{poc_dir.resolve()}:/poc:ro", "-v", f"{scratch}:/scratch:rw", "-e", "OSS_POC_REPO=/repo", "-e", "OSS_POC_SCRATCH=/scratch", "-e", "TMPDIR=/scratch", "-e", "PYTHONDONTWRITEBYTECODE=1", "-w", "/poc", image, *command]
             env = os.environ.copy()
         try:
-            limit_process = not container and sys.platform.startswith("linux")
+            limit_process = not container and os.name == "posix"
             process = subprocess.Popen(args, cwd=None if container else poc_dir, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True, preexec_fn=self._limits if limit_process else None)
             stdout, stderr = process.communicate(timeout=min(int(manifest.get("timeout_seconds", 30)), 120))
-            return {"returncode": process.returncode, "stdout": stdout[:4000], "stderr": stderr[:4000], "timed_out": False}
+            return {"returncode": process.returncode, "stdout": stdout[:4000], "stderr": stderr[:4000], "timed_out": False, "isolation": isolation}
         except subprocess.TimeoutExpired as exc:
             if "process" in locals() and process.poll() is None:
                 try:
@@ -1584,7 +1599,7 @@ class PocValidatorAgent:
                 stdout, stderr = process.communicate()
             else:
                 stdout, stderr = str(exc.stdout or ""), str(exc.stderr or "")
-            return {"returncode": None, "stdout": str(stdout or "")[:4000], "stderr": str(stderr or "")[:4000], "timed_out": True}
+            return {"returncode": None, "stdout": str(stdout or "")[:4000], "stderr": str(stderr or "")[:4000], "timed_out": True, "isolation": isolation}
 
     def run(self, manifest_file: Path, container: bool = False) -> Path:
         manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
@@ -1601,6 +1616,11 @@ class PocValidatorAgent:
         proof_file = poc_dir / proof_name
         if not proof_file.is_file() or "TODO" in proof_file.read_text(encoding="utf-8"):
             raise ValueError("PoC의 실제 호출·대조군 TODO를 완성해야 합니다")
+        expected_runtime = "node" if proof_name.endswith(".mjs") else "python3"
+        for case in ("control", "attack"):
+            command = manifest.get(case)
+            if not isinstance(command, list) or len(command) != 3 or Path(str(command[0])).name not in {expected_runtime, "python" if expected_runtime == "python3" else expected_runtime} or command[1:] != [proof_name, case]:
+                raise ValueError("PoC 실행 명령이 생성기가 허용한 형식을 벗어났습니다")
         with tempfile.TemporaryDirectory(prefix="oss-poc-") as temporary:
             control_scratch = Path(temporary) / "control"
             attack_scratch = Path(temporary) / "attack"
@@ -1611,7 +1631,9 @@ class PocValidatorAgent:
         control_match = marker in control["stdout"]
         attack_match = marker in attack["stdout"]
         confirmed = attack_match and not control_match and attack["returncode"] == 0 and control["returncode"] == 0 and not attack["timed_out"] and not control["timed_out"]
-        evidence = {"finding_id": manifest["finding_id"], "repo_path": str(repo), "commit": manifest["commit"], "proof_file": proof_name, "proof_sha256": hashlib.sha256(proof_file.read_bytes()).hexdigest(), "manifest_sha256": hashlib.sha256(manifest_file.read_bytes()).hexdigest(), "mode": "offline_container" if container else "limited_process", "control": control, "attack": attack, "control_observable": control_match, "attack_observable": attack_match, "mechanical_result": "contrast_matched" if confirmed else "not_confirmed", "validated_at": datetime.now(timezone.utc).isoformat(), "note": "기계적 관측 결과입니다. 로컬 제한 프로세스는 컨테이너 수준의 파일·네트워크 격리를 제공하지 않으며 코드 경로와 보안 영향은 별도로 검토해야 합니다."}
+        mode = "offline_container" if container else "macos_sandbox" if control.get("isolation") == attack.get("isolation") == "macos_sandbox_no_network" else "limited_process"
+        note = "기계적 관측 결과입니다. macOS sandbox 또는 컨테이너가 네트워크와 쓰기 범위를 제한했습니다. 코드 경로와 보안 영향은 별도로 검토해야 합니다." if mode != "limited_process" else "기계적 관측 결과입니다. 로컬 제한 프로세스는 완전한 파일·네트워크 격리를 제공하지 않으며 코드 경로와 보안 영향은 별도로 검토해야 합니다."
+        evidence = {"finding_id": manifest["finding_id"], "repo_path": str(repo), "commit": manifest["commit"], "proof_file": proof_name, "proof_sha256": hashlib.sha256(proof_file.read_bytes()).hexdigest(), "manifest_sha256": hashlib.sha256(manifest_file.read_bytes()).hexdigest(), "mode": mode, "isolation": {"control": control.get("isolation"), "attack": attack.get("isolation")}, "control": control, "attack": attack, "control_observable": control_match, "attack_observable": attack_match, "mechanical_result": "contrast_matched" if confirmed else "not_confirmed", "validated_at": datetime.now(timezone.utc).isoformat(), "note": note}
         output = poc_dir / "evidence.json"
         output.write_text(json.dumps(evidence, ensure_ascii=False, indent=2), encoding="utf-8")
         return output
@@ -1752,6 +1774,50 @@ CVE ID: not assigned. Coordinate the request with the repository maintainer or a
         ghsa.write_text(description, encoding="utf-8")
         cve.write_text(cve_text, encoding="utf-8")
         return ghsa, cve
+
+
+SUBMISSION_TRANSITIONS = {
+    "draft_ready": {"reviewed"},
+    "reviewed": {"submitted", "rejected"},
+    "submitted": {"accepted", "rejected"},
+    "accepted": set(),
+    "rejected": set(),
+}
+
+
+def submission_status(audit_file: Path, finding_id: str) -> dict:
+    audit_data, _ = load_hypothesis(audit_file, finding_id)
+    folder = audit_file.parent / finding_id
+    if not (folder / "GHSA_CANDIDATE.md").is_file() or not (folder / "CVE_REQUEST_BRIEF.md").is_file():
+        raise ValueError("수동 제출 상태를 기록할 제보 초안이 없습니다")
+    state_file = folder / "submission.json"
+    if state_file.is_file():
+        state = json.loads(state_file.read_text(encoding="utf-8"))
+        if state.get("finding_id") != finding_id or state.get("commit") != audit_data["commit"]:
+            raise ValueError("제출 상태가 현재 후보·커밋과 일치하지 않습니다")
+        return state
+    return {"schema_version": 1, "finding_id": finding_id, "commit": audit_data["commit"], "status": "draft_ready", "external_action": "none", "reference": "", "note": "", "history": []}
+
+
+def mark_submission_status(audit_file: Path, finding_id: str, status: str, reference: str = "", note: str = "") -> Path:
+    current = submission_status(audit_file, finding_id)
+    previous = current["status"]
+    if status not in SUBMISSION_TRANSITIONS.get(previous, set()):
+        raise ValueError(f"허용되지 않은 제출 상태 전환입니다: {previous} → {status}")
+    reference = reference.strip()
+    note = note.strip()
+    if status in {"submitted", "accepted"} and not reference:
+        raise ValueError("제출 또는 접수 상태에는 사람이 확인한 외부 참조가 필요합니다")
+    if any("\n" in value or len(value) > 500 for value in (reference, note)):
+        raise ValueError("제출 상태 참조와 메모는 한 줄 500자 이하여야 합니다")
+    stamp = datetime.now(timezone.utc).isoformat()
+    event = {"from": previous, "to": status, "at": stamp, "reference": reference, "note": note, "recorded_by": "human_cli"}
+    updated = {**current, "status": status, "external_action": "recorded_only", "reference": reference or current.get("reference", ""), "note": note, "updated_at": stamp, "history": [*current.get("history", []), event]}
+    destination = audit_file.parent / finding_id / "submission.json"
+    temporary = destination.with_suffix(".json.tmp")
+    temporary.write_text(json.dumps(updated, ensure_ascii=False, indent=2), encoding="utf-8")
+    temporary.replace(destination)
+    return destination
 
 
 class DuplicateReviewAgent:

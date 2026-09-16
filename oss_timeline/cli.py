@@ -9,7 +9,7 @@ from pathlib import Path
 
 from .benchmark import benchmark_passes, run_benchmark
 from .core import ApiError, HttpClient, Store, repo_name, synchronize
-from .research import DisclosureAgent, PocValidatorAgent, ResearchOrchestrator, audit, checkout, prepare_poc
+from .research import DisclosureAgent, PocValidatorAgent, ResearchOrchestrator, audit, checkout, mark_submission_status, prepare_poc, submission_status
 
 
 def html_report(data: dict) -> str:
@@ -94,6 +94,15 @@ def main(argv: list[str] | None = None) -> int:
     disclosure.add_argument("finding_id")
     disclosure.add_argument("--claim", type=Path, required=True)
     disclosure.add_argument("--evidence", type=Path, required=True)
+    report_status = commands.add_parser("report-status", help="사람이 제출하는 제보 초안의 로컬 상태 확인")
+    report_status.add_argument("audit_file", type=Path)
+    report_status.add_argument("finding_id")
+    report_mark = commands.add_parser("report-mark", help="사람의 검토·제출 결과를 로컬에 기록")
+    report_mark.add_argument("audit_file", type=Path)
+    report_mark.add_argument("finding_id")
+    report_mark.add_argument("--status", required=True, choices=["reviewed", "submitted", "accepted", "rejected"])
+    report_mark.add_argument("--reference", default="", help="제출 URL·티켓·접수 번호 등 사람이 확인한 참조")
+    report_mark.add_argument("--note", default="")
     args = parser.parse_args(argv)
     if args.command in {"sync", "watch"} and (args.max_pages < 1 or args.max_manifests < 1):
         parser.error("페이지 및 매니페스트 제한은 1 이상이어야 합니다")
@@ -115,7 +124,7 @@ def main(argv: list[str] | None = None) -> int:
         except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError) as exc:
             print(str(exc), file=sys.stderr)
             return 1
-    if args.command in {"audit", "research-run", "poc-init", "poc-verify", "disclosure"}:
+    if args.command in {"audit", "research-run", "poc-init", "poc-verify", "disclosure", "report-status", "report-mark"}:
         try:
             if args.command in {"audit", "research-run"}:
                 target_path = Path(args.target)
@@ -147,9 +156,14 @@ def main(argv: list[str] | None = None) -> int:
                 evidence = json.loads(output.read_text(encoding="utf-8"))
                 print(json.dumps({"evidence_file": str(output), "mechanical_result": evidence["mechanical_result"]}, ensure_ascii=False))
                 return 0 if evidence["mechanical_result"] == "contrast_matched" else 1
-            else:
+            elif args.command == "disclosure":
                 ghsa, cve = DisclosureAgent().run(args.audit_file, args.finding_id, args.claim, args.evidence)
                 print(json.dumps({"ghsa_draft": str(ghsa), "cve_brief": str(cve)}, ensure_ascii=False))
+            elif args.command == "report-status":
+                print(json.dumps(submission_status(args.audit_file, args.finding_id), ensure_ascii=False))
+            else:
+                state_file = mark_submission_status(args.audit_file, args.finding_id, args.status, args.reference, args.note)
+                print(json.dumps({"submission_file": str(state_file), "state": json.loads(state_file.read_text(encoding="utf-8"))}, ensure_ascii=False))
             return 0
         except (ApiError, ValueError, RuntimeError, OSError, json.JSONDecodeError, KeyError) as exc:
             print(str(exc), file=sys.stderr)

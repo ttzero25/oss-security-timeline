@@ -15,6 +15,7 @@ GitHub 오픈소스 저장소의 변경과 공개 취약점 공지를 한 시간
 - 심층 조사 전에 커밋별 저장소 프로필을 만들어 언어 분포, 프레임워크, 프로젝트 유형, 패키지·빌드 매니페스트, lockfile, HTTP·CLI·메시지 엔트리포인트, 최근 변경 파일과 미지원 코드 파일 수를 기록합니다. 이 범위 원장은 “후보 0건”을 전수 안전 판정으로 오인하지 않게 합니다.
 - 대규모 저장소에서는 최근 변경 파일을 먼저 분석하고 나머지를 경로순으로 처리합니다. 파일 상한 때문에 제외된 수를 기록하며, 같은 커밋·같은 상한·깨끗한 작업 트리의 재실행은 정적 조사 결과를 재사용하되 공개 공지 스냅샷은 다시 읽습니다.
 - Research Orchestrator는 최근 변경 경로를 후보 우선순위에 반영하고, 기본 설정 도달성 확인, 제한된 Python·JavaScript·Go 후보의 실제 함수 호출 PoC, 격리 대조, 수집된 공개 공지 중복 점검을 연결합니다. JavaScript 자동 실행은 Node 내장 모듈만 가져오고 import 외 최상위 실행문이 없는 단일 default export 함수로 제한합니다. Go는 표준 라이브러리만 쓰는 단일 파일·단일 함수 HTTP 핸들러를 원문 해시 확인 후 임시 디렉터리에서 `GOPROXY=off`로 실행합니다. 중복 점검은 CVE/GHSA, CWE, 패키지, 코드 경로·함수 토큰과 공지 참조 커밋을 점수화하며 7일보다 오래된 스냅샷에서는 초안을 중단합니다. 마지막으로 외부 도달성·기본 설정·공격자 통제·보안 영향·기존 공지 중복의 다섯 근거를 기록합니다. 게이트를 통과한 결과만 제보 **초안**으로 만들며 외부 제출과 CVE/GHSA 번호 부여는 자동으로 하지 않습니다.
+- 기본 PoC 검증은 CPU·출력 크기·파일 디스크립터를 제한한 로컬 프로세스이며, macOS에서는 사용 가능한 시스템 sandbox로 네트워크를 막고 쓰기를 임시 scratch로 제한합니다. 실제 적용 모드는 증거 JSON에 기록되고 Docker 격리는 선택 사항으로 유지됩니다.
 - 로컬 웹의 Home에서 누적 탐지와 에이전트 역할을, 실험실에서 저장소별 조사 상태를, 정리에서 OSS별 요약을 확인할 수 있습니다. 관계망은 데이터 연결을, 리포트는 CLI에서 생성된 검증 결과와 비공개 초안을 읽기 전용으로 보여줍니다.
 - 웹 시작 시 과거 `audit.json`과 `orchestration.json` 쌍을 실행하지 않고 타임라인 DB에 이관합니다. 정리 화면은 `미실행`, `정적 조사만 완료`, `완료 · 후보 없음`, `완료 · 검토 후보 있음`, `완료 · 초안 준비`를 구분합니다.
 
@@ -40,6 +41,14 @@ Python 3.11 이상이 필요합니다. 기본 CLI와 웹 화면에는 추가 Pyt
 
    ```sh
    python3 tools/web.py --port 8765
+   ```
+
+4. 제보 초안은 자동 제출되지 않습니다. 사람이 검토·제출한 뒤 다음 명령으로 로컬 상태만 기록하면 리포트 탭에 반영됩니다.
+
+   ```bash
+   python3 -m oss_timeline report-mark data/research/OWNER_REPO/COMMIT/audit.json FINDING_ID --status reviewed
+   python3 -m oss_timeline report-mark data/research/OWNER_REPO/COMMIT/audit.json FINDING_ID --status submitted --reference '제출 URL 또는 접수 번호'
+   python3 -m oss_timeline report-status data/research/OWNER_REPO/COMMIT/audit.json FINDING_ID
    ```
 
 4. 다른 터미널에서 회귀 검사를 실행합니다.

@@ -151,10 +151,19 @@ def disclosure_index(root: Path) -> list[dict]:
             except (OSError, UnicodeError):
                 ghsa_text = cve_text = ""
             drafts_ready = verified and bool(ghsa_text and cve_text)
+            submission = {"status": "draft_ready", "external_action": "none", "reference": "", "history": []}
+            submission_path = folder / "submission.json"
+            if drafts_ready and submission_path.is_file():
+                try:
+                    saved = json.loads(submission_path.read_text(encoding="utf-8"))
+                    if saved.get("finding_id") == finding_id and saved.get("commit") == commit:
+                        submission = saved
+                except (OSError, ValueError, TypeError):
+                    submission = {"status": "invalid", "external_action": "none", "reference": "", "history": []}
             title = finding_id
             if ghsa_text.startswith("# "):
                 title = ghsa_text.splitlines()[0][2:].strip() or finding_id
-            items.append({"key": f"{repo}|{commit}|{finding_id}", "repo": repo, "commit": commit, "finding_id": finding_id, "kind": finding.get("kind", ""), "path": finding.get("path", ""), "sink_line": finding.get("sink_line", ""), "title": title, "mechanical_result": evidence.get("mechanical_result", "not_run"), "validated_at": evidence.get("validated_at"), "verification_mode": evidence.get("mode"), "verified": verified, "drafts_ready": drafts_ready, "ghsa_text": ghsa_text, "cve_text": cve_text})
+            items.append({"key": f"{repo}|{commit}|{finding_id}", "repo": repo, "commit": commit, "finding_id": finding_id, "kind": finding.get("kind", ""), "path": finding.get("path", ""), "sink_line": finding.get("sink_line", ""), "title": title, "mechanical_result": evidence.get("mechanical_result", "not_run"), "validated_at": evidence.get("validated_at"), "verification_mode": evidence.get("mode"), "verified": verified, "drafts_ready": drafts_ready, "submission": submission, "ghsa_text": ghsa_text, "cve_text": cve_text})
     return sorted(items, key=lambda item: (item.get("validated_at") or "", item["repo"], item["finding_id"]), reverse=True)
 
 
@@ -343,10 +352,16 @@ def graph_page(repositories: list[str], selected: str | None = None) -> str:
 def reports_page(reports: list[dict], selected_key: str | None = None, document: str = "ghsa") -> str:
     ready = sum(item["drafts_ready"] for item in reports)
     verified = sum(item["verified"] for item in reports)
+    submitted = sum(item.get("submission", {}).get("status") in {"submitted", "accepted"} for item in reports)
     selected = next((item for item in reports if item["key"] == selected_key), None)
     cards = ""
     for item in reports:
-        if item["drafts_ready"]:
+        submission = item.get("submission", {})
+        submission_status = submission.get("status", "draft_ready")
+        state_labels = {"reviewed": "사람 검토 완료", "submitted": "사람이 제출함", "accepted": "접수/승인", "rejected": "종료/거절", "invalid": "상태 파일 오류"}
+        if submission_status in state_labels:
+            state, state_class = state_labels[submission_status], "ready" if submission_status in {"submitted", "accepted"} else "verified" if submission_status == "reviewed" else "pending"
+        elif item["drafts_ready"]:
             state, state_class = "제보 초안 준비", "ready"
         elif item["verified"]:
             state, state_class = "PoC 대조 성공", "verified"
@@ -356,14 +371,14 @@ def reports_page(reports: list[dict], selected_key: str | None = None, document:
         if item["drafts_ready"]:
             key = quote(item["key"], safe="")
             links = f'<div class="report-links"><a href="/reports?report={key}&amp;doc=ghsa">GHSA 초안 보기</a><a href="/reports?report={key}&amp;doc=cve">CVE 브리프 보기</a></div>'
-        cards += f'''<article class="report-card"><div class="report-card-head"><span class="report-state {state_class}">{state}</span><small>{esc(str(item.get("validated_at") or "검증 기록 없음")[:19])}</small></div><h2>{esc(item["title"])}</h2><p>{esc(item["repo"])} · <code>{esc(item["commit"][:12])}</code></p><dl><div><dt>후보 ID</dt><dd>{esc(item["finding_id"])}</dd></div><div><dt>유형</dt><dd>{esc(item["kind"] or "미기재")}</dd></div><div><dt>위치</dt><dd>{esc(item["path"])}:{esc(item["sink_line"])}</dd></div><div><dt>검증 방식</dt><dd>{esc(item.get("verification_mode") or "미실행")}</dd></div></dl>{links}</article>'''
+        cards += f'''<article class="report-card"><div class="report-card-head"><span class="report-state {state_class}">{state}</span><small>{esc(str(item.get("validated_at") or "검증 기록 없음")[:19])}</small></div><h2>{esc(item["title"])}</h2><p>{esc(item["repo"])} · <code>{esc(item["commit"][:12])}</code></p><dl><div><dt>후보 ID</dt><dd>{esc(item["finding_id"])}</dd></div><div><dt>유형</dt><dd>{esc(item["kind"] or "미기재")}</dd></div><div><dt>위치</dt><dd>{esc(item["path"])}:{esc(item["sink_line"])}</dd></div><div><dt>검증 방식</dt><dd>{esc(item.get("verification_mode") or "미실행")}</dd></div><div><dt>제출 참조</dt><dd>{esc(submission.get("reference") or "기록 없음")}</dd></div></dl>{links}</article>'''
     viewer = ""
     if selected:
         label = "GHSA 비공개 제보 초안" if document == "ghsa" else "CVE 요청 브리프"
         content = selected["ghsa_text"] if document == "ghsa" else selected["cve_text"]
         if selected["drafts_ready"] and content:
             viewer = f'''<section class="report-viewer"><div class="section-heading"><div><span class="eyebrow">PRIVATE DRAFT</span><h2>{label}</h2></div><a href="/reports">닫기</a></div><div class="notice subdued">로컬 CLI가 생성한 비공개 초안입니다. 자동 제출되지 않았으며 공개 전 사람의 검토가 필요합니다.</div><pre>{esc(content)}</pre></section>'''
-    body = f'''<section class="page-head"><span class="eyebrow">CLI ARTIFACTS</span><h1>검증 리포트</h1><p>자원 제한 CLI 검증 결과와 비공개 GHSA/CVE 제보 초안을 읽기 전용으로 확인합니다.</p></section><section><div class="metrics compact">{metric("CLI 산출물", len(reports), "PoC 실행 기록 포함")}{metric("PoC 대조 성공", verified, "동일 커밋·후보 근거")}{metric("제보 초안", ready, "GHSA와 CVE 문서 쌍")}</div></section>{viewer}<section><div class="section-heading"><div><span class="eyebrow">LOCAL ONLY</span><h2>리포트 목록</h2></div><p>새로고침할 때 data/research를 다시 읽음</p></div><div class="notice subdued">웹은 이 산출물을 실행하거나 수정하거나 외부로 제출하지 않습니다. ‘미확인’ 항목은 제로데이 발견으로 간주할 수 없습니다.</div><div class="report-grid">{cards}</div>{empty("아직 CLI PoC 검증 또는 제보 초안 산출물이 없습니다.") if not reports else ""}</section>'''
+    body = f'''<section class="page-head"><span class="eyebrow">CLI ARTIFACTS</span><h1>검증 리포트</h1><p>자원 제한 CLI 검증 결과와 비공개 GHSA/CVE 제보 초안을 읽기 전용으로 확인합니다.</p></section><section><div class="metrics compact">{metric("CLI 산출물", len(reports), "PoC 실행 기록 포함")}{metric("PoC 대조 성공", verified, "동일 커밋·후보 근거")}{metric("제보 초안", ready, "GHSA와 CVE 문서 쌍")}{metric("사람이 제출", submitted, "CLI에 기록된 상태")}</div></section>{viewer}<section><div class="section-heading"><div><span class="eyebrow">LOCAL ONLY</span><h2>리포트 목록</h2></div><p>새로고침할 때 data/research를 다시 읽음</p></div><div class="notice subdued">웹은 이 산출물을 실행하거나 수정하거나 외부로 제출하지 않습니다. 제출 상태도 사람이 수행한 결과를 CLI로 기록한 값일 뿐입니다.</div><div class="report-grid">{cards}</div>{empty("아직 CLI PoC 검증 또는 제보 초안 산출물이 없습니다.") if not reports else ""}</section>'''
     return page("검증 리포트", "reports", body)
 
 
