@@ -6,7 +6,8 @@
 
   function apply(theme) {
     document.documentElement.dataset.theme = theme;
-    button.textContent = theme === "light" ? "☀ 낮" : "☾ 밤";
+    button.textContent = theme === "light" ? "☀" : "☾";
+    button.title = theme === "light" ? "낮 테마 사용 중 · 밤 테마로 전환" : "밤 테마 사용 중 · 낮 테마로 전환";
     button.setAttribute("aria-pressed", theme === "light" ? "true" : "false");
     window.dispatchEvent(new Event("themechange"));
   }

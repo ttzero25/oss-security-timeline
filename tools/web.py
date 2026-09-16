@@ -396,7 +396,7 @@ def page(title: str, active: str, content: str, refresh: bool = False) -> str:
     nav = "".join(f'<a class="{"active" if active == key else ""}" href="{url}">{label}</a>' for key, url, label in [("home", "/", "Home"), ("lab", "/lab", "실험실"), ("summary", "/summary", "정리"), ("graph", "/graph", "관계망"), ("reports", "/reports", "리포트")])
     meta = '<meta http-equiv="refresh" content="5">' if refresh else ""
     return f'''<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">{meta}<title>{esc(title)} · OSS Security Timeline</title><style>{CSS}</style></head>
-<body><div class="shell"><header class="topbar"><a class="brand" href="/"><span class="brand-mark">◈</span> OSS Security Timeline</a><nav aria-label="주요 메뉴">{nav}</nav><button id="theme-toggle" class="theme-toggle" type="button" aria-label="낮과 밤 밝기 전환">밝기</button><span class="local-badge">LOCAL ONLY</span></header><main>{content}</main><footer>공개 정보와 로컬 조사 기록을 보여줍니다. 코드 후보는 검증된 취약점이 아닙니다.</footer></div><script src="/theme.js" defer></script></body></html>'''
+<body><div class="shell"><header class="topbar"><a class="brand" href="/"><span class="brand-mark">◈</span> OSS Security Timeline</a><nav aria-label="주요 메뉴">{nav}</nav><button id="theme-toggle" class="theme-toggle" type="button" aria-label="낮과 밤 밝기 전환" title="낮과 밤 밝기 전환">☾</button><span class="local-badge">LOCAL ONLY</span></header><main>{content}</main><footer>공개 정보와 로컬 조사 기록을 보여줍니다. 코드 후보는 검증된 취약점이 아닙니다.</footer></div><script src="/theme.js" defer></script></body></html>'''
 
 
 def metric(label: str, value: object, detail: str) -> str:

@@ -10,7 +10,7 @@
   const count = document.getElementById("graph-count");
   const detail = document.getElementById("graph-detail");
   const palette = {
-    repository: "#73e1ba", package: "#6eb6ff", advisory: "#f0c36b",
+    repository: "#78c7a5", package: "#6eb6ff", advisory: "#f0c36b",
     cve: "#ff8f82", cwe: "#c49cff", commit: "#8ed0c2",
     change: "#efaa73", finding: "#ff9fc9", weakness: "#b4c4bd"
   };

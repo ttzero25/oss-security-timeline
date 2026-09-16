@@ -16,6 +16,7 @@ class DashboardTests(unittest.TestCase):
             self.assertIn("<strong>0</strong>", rendered)
             self.assertNotIn("lodash/lodash", rendered)
             self.assertIn('id="theme-toggle"', rendered)
+            self.assertIn('title="낮과 밤 밝기 전환">☾</button>', rendered)
             self.assertIn('src="/theme.js"', rendered)
 
     def test_lab_shows_cve_cwe_and_before_after_versions(self):
