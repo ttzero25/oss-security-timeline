@@ -46,6 +46,12 @@ Python 3.11 이상이 필요합니다. 기본 CLI와 웹 화면에는 추가 Pyt
    python3 -m unittest discover -s tests
    ```
 
+5. 라벨된 로컬 코퍼스로 현재 정적 탐지 기준선을 측정합니다. 결과는 `data/benchmarks/latest.json`에 저장되고 웹의 정리 화면에도 표시됩니다.
+
+   ```sh
+   python3 -m oss_timeline benchmark
+   ```
+
 웹은 한 번에 한 저장소를 조사하며 API 페이지와 매니페스트를 각각 최대 100개, 공지 참조 커밋은 최대 5개까지 읽습니다. 두 번째 수집부터는 마지막 관측 시각 이후 커밋만 요청해 API 사용량을 줄이되, 첫 수집에서 잘린 과거 이력은 완료로 오인하지 않고 경고를 유지합니다. 조사 완료 뒤 실험실의 수집 범위와 경고를 확인하세요. CWE와 참조 커밋 비교는 새 수집부터 채워지므로 기존 저장소는 다시 수집해야 합니다. 더 세밀한 범위 설정과 정기 관측에는 CLI의 `sync`·`watch`를 사용합니다. 문제가 생기면 [troubleshooting](troubleshooting/README.md)을 먼저 확인하세요.
 
 ## 코드 조사와 제보 흐름
@@ -80,6 +86,7 @@ python3 -m oss_timeline disclosure path/to/audit.json FIND-XXXXXXXXXXXX \
 | [troubleshooting](troubleshooting/README.md) | API 제한·PoC 실행·수집 누락 등의 해결 방법 |
 | `oss_timeline/` | 실행 코드와 SQLite 저장·보고서 생성 |
 | `tests/` | 수집·중복 제거·PoC·제보 게이트 회귀 검사 |
+| `benchmarks/` | 취약·정상 대조 사례와 정적 탐지 성능 기준선 |
 | `data/` | 실행 중 생성되는 DB, 복제본, PoC, 비공개 초안; Git 제외 |
 
 공개 데이터 흐름은 `InventoryAgent → (ChangeAgent + AdvisoryAgent 병렬) → CandidateAgent`입니다. 코드 조사 흐름은 `RepositoryProfilerAgent → SourceScanAgent → ReachabilityGateAgent → ResearchOrchestrator → PocValidatorAgent → EvidenceGateAgent → DisclosureAgent`이며 결과 상태가 다시 타임라인에 들어갑니다. 이 역할들은 재현 가능한 Python 모듈이며, 지원 범위를 벗어난 후보는 사람의 분석 대상으로 남깁니다.
@@ -91,3 +98,5 @@ python3 -m oss_timeline disclosure path/to/audit.json FIND-XXXXXXXXXXXX \
 수치 예측은 과거 **공개 보안 공지 게시 건수**로 향후 12개월을 추정합니다. 공개 공지 5건과 관측 기간 24개월 미만이면 산출하지 않으며, 관측할 수 없는 미공개 제로데이 발생 수는 예측하지 않습니다. 코드 스캔의 빈 결과도 안전성의 증거가 아닙니다.
 
 데이터 원천: [GitHub 저장소 보안 공지 API](https://docs.github.com/en/rest/security-advisories/repository-advisories), [GitHub 글로벌 보안 공지 API](https://docs.github.com/en/rest/security-advisories/global-advisories), [GitHub Git Trees API](https://docs.github.com/en/rest/git/trees), [OSV](https://osv.dev/).
+
+내장 벤치마크는 합성 사례의 회귀 감지용이며 실제 저장소의 탐지율이나 제로데이 발견 성능을 의미하지 않습니다. `--min-recall`과 `--max-false-positive-cases`로 자동 회귀 기준을 설정할 수 있습니다.

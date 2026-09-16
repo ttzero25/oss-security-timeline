@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "name": "oss-security-timeline synthetic security corpus",
+  "version": "2026.09.1",
+  "cases": [
+    {"id":"python-command-direct","path":"cases/python_command_direct","expectation":"vulnerable","expected_kinds":["command_injection"],"max_rank":3,"description":"HTTP request field reaches a shell-enabled subprocess"},
+    {"id":"python-command-multihop","path":"cases/python_command_multihop","expectation":"vulnerable","expected_kinds":["command_injection"],"max_rank":3,"description":"Route input crosses two imported helpers before a shell sink"},
+    {"id":"python-method-multihop","path":"cases/python_method_multihop","expectation":"vulnerable","expected_kinds":["command_injection"],"max_rank":3,"description":"Route input reaches a sink through an imported class instance; retained to measure method-dispatch false negatives"},
+    {"id":"python-ssrf","path":"cases/python_ssrf","expectation":"vulnerable","expected_kinds":["possible_ssrf"],"max_rank":3,"description":"Route URL reaches an outbound HTTP request"},
+    {"id":"python-deserialization","path":"cases/python_deserialization","expectation":"vulnerable","expected_kinds":["unsafe_deserialization"],"max_rank":3,"description":"Request bytes reach pickle.loads"},
+    {"id":"javascript-eval","path":"cases/javascript_eval","expectation":"vulnerable","expected_kinds":["code_execution"],"max_rank":3,"description":"Express request data reaches eval"},
+    {"id":"c-command","path":"cases/c_command","expectation":"vulnerable","expected_kinds":["command_injection"],"max_rank":3,"description":"argv reaches system"},
+    {"id":"python-safe-argv","path":"cases/python_safe_argv","expectation":"clean","expected_kinds":[],"description":"Untrusted value is passed as a non-shell argument"},
+    {"id":"python-allowlist-command","path":"cases/python_allowlist_command","expectation":"clean","expected_kinds":[],"description":"An allowlisted action selects a fixed command; retained to measure sanitizer false positives"},
+    {"id":"javascript-safe","path":"cases/javascript_safe","expectation":"clean","expected_kinds":[],"description":"Request data is displayed without an execution sink"},
+    {"id":"c-safe-command","path":"cases/c_safe_command","expectation":"clean","expected_kinds":[],"description":"system receives a fixed literal rather than argv"}
+  ]
+}

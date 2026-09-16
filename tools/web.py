@@ -226,6 +226,14 @@ def snapshot(path: Path, repo: str | None = None) -> tuple[dict, dict]:
         store.db.close()
 
 
+def benchmark_snapshot(path: Path) -> dict | None:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if data.get("schema_version") == 1 and isinstance(data.get("metrics"), dict) else None
+    except (OSError, ValueError, TypeError):
+        return None
+
+
 def graph_snapshot(db_path: Path, research_root: Path, fix_root: Path, repo: str | None = None) -> dict:
     store = Store(db_path)
     try:
@@ -467,7 +475,7 @@ def lab(selected: str | None, report: dict | None, audits: list[dict], job: dict
     return page("실험실", "lab", body, running)
 
 
-def summary(report: dict, audits: list[dict]) -> str:
+def summary(report: dict, audits: list[dict], benchmark: dict | None = None) -> str:
     by_repo = {}
     for audit in audits:
         by_repo.setdefault(audit["repo"], audit)
@@ -478,9 +486,14 @@ def summary(report: dict, audits: list[dict]) -> str:
     ordered = sorted(report["repositories"], key=lambda x: (-rank.get(x["name"], 0), x["name"]))
     rows = "".join(f'<tr><td><a href="/lab?repo={quote(x["name"])}">{esc(x["name"])}</a></td><td>{rank.get(x["name"], 0)}</td><td>{sum(p["repo"] == x["name"] for p in report["packages"])}</td><td>{len(by_repo.get(x["name"], {}).get("hypotheses", []))}</td><td>{esc(research_status(by_repo.get(x["name"]), latest_run.get(x["name"])))}</td><td>{esc(str(x.get("last_sync") or "")[:16])} UTC</td></tr>' for x in ordered)
     packages = "".join(f'<tr><td>{esc(x["repo"])}</td><td>{esc(x["ecosystem"])}</td><td>{esc(x["name"])}</td><td>{x["advisories"]}</td></tr>' for x in report["packages"][:50])
+    benchmark_section = ""
+    if benchmark:
+        metrics = benchmark["metrics"]
+        percent = lambda value: f"{float(value) * 100:.1f}%" if value is not None else "미산출"
+        benchmark_section = f'''<section><div class="section-heading"><div><span class="eyebrow">SCANNER BENCHMARK</span><h2>정적 탐지 기준선</h2></div><p>{esc(benchmark.get("corpus_version", ""))} · {esc(str(benchmark.get("generated_at") or "")[:19])} UTC</p></div><div class="metrics compact">{metric("취약 사례 재현율", percent(metrics.get("recall_at_case_limit")), f'{metrics.get("true_positive_cases", 0)}/{metrics.get("vulnerable_cases", 0)} 사례')}{metric("사례 정밀도", percent(metrics.get("case_precision")), f'오탐 사례 {metrics.get("false_positive_cases", 0)}건')}{metric("정상 사례 특이도", percent(metrics.get("clean_specificity")), f'{metrics.get("true_negative_cases", 0)}/{metrics.get("clean_cases", 0)} 사례')}{metric("전체 통과율", percent(metrics.get("pass_rate")), f'총 {metrics.get("total_cases", 0)} 사례')}</div><p class="coverage">{esc(benchmark.get("scope"))}. 합성 코퍼스 기준이며 실제 저장소 성능을 대신하지 않습니다.</p></section>'''
     forecast = report.get("forecast", {})
     forecast_text = f'향후 {forecast.get("horizon_months")}개월 공개 공지 {forecast.get("expected")}건 예상' if forecast.get("status") == "estimated" else forecast.get("reason", "관측 기간과 공지 건수가 부족합니다.")
-    body = f'''<section class="page-head"><span class="eyebrow">PORTFOLIO</span><h1>정리</h1><p>OSS별 공개 공지와 패키지, 코드 검토 후보를 한눈에 비교합니다.</p></section><section><div class="section-heading"><div><span class="eyebrow">REPOSITORIES</span><h2>저장소별 결과</h2></div><p>공지 수는 저장소별 고유 건수</p></div>{table(["저장소", "공지", "패키지", "코드 가설", "심층 조사", "마지막 수집"], rows) if rows else empty("아직 조사한 저장소가 없습니다. 실험실에서 첫 링크를 입력하세요.")}</section><section><div class="section-heading"><div><span class="eyebrow">PACKAGE RANKING</span><h2>패키지별 보안 공지</h2></div></div>{table(["저장소", "생태계", "패키지", "공지"], packages) if packages else empty("아직 패키지에 연결된 보안 공지가 없습니다.")}</section><section class="panel"><span class="eyebrow">FORECAST</span><h2>공개 공지 추정</h2><p>{esc(forecast_text)}</p><small>미공개 제로데이 발생 수는 공개 공지 이력만으로 예측할 수 없습니다.</small></section>'''
+    body = f'''<section class="page-head"><span class="eyebrow">PORTFOLIO</span><h1>정리</h1><p>OSS별 공개 공지와 패키지, 코드 검토 후보를 한눈에 비교합니다.</p></section><section><div class="section-heading"><div><span class="eyebrow">REPOSITORIES</span><h2>저장소별 결과</h2></div><p>공지 수는 저장소별 고유 건수</p></div>{table(["저장소", "공지", "패키지", "코드 가설", "심층 조사", "마지막 수집"], rows) if rows else empty("아직 조사한 저장소가 없습니다. 실험실에서 첫 링크를 입력하세요.")}</section>{benchmark_section}<section><div class="section-heading"><div><span class="eyebrow">PACKAGE RANKING</span><h2>패키지별 보안 공지</h2></div></div>{table(["저장소", "생태계", "패키지", "공지"], packages) if packages else empty("아직 패키지에 연결된 보안 공지가 없습니다.")}</section><section class="panel"><span class="eyebrow">FORECAST</span><h2>공개 공지 추정</h2><p>{esc(forecast_text)}</p><small>미공개 제로데이 발생 수는 공개 공지 이력만으로 예측할 수 없습니다.</small></section>'''
     return page("정리", "summary", body)
 
 
@@ -584,7 +597,7 @@ def serve(port: int, db_path: Path, research_root: Path, registry_path: Path) ->
                 elif path == "/":
                     self.respond(home(report, stats, audits, agent_registry(registry_path)))
                 elif path == "/summary":
-                    self.respond(summary(report, audits))
+                    self.respond(summary(report, audits, benchmark_snapshot(db_path.parent / "benchmarks" / "latest.json")))
                 elif path == "/graph":
                     all_report, _ = snapshot(db_path)
                     self.respond(graph_page([x["name"] for x in all_report["repositories"]], selected))

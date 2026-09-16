@@ -7,6 +7,7 @@ import sys
 import time
 from pathlib import Path
 
+from .benchmark import benchmark_passes, run_benchmark
 from .core import ApiError, HttpClient, Store, repo_name, synchronize
 from .research import DisclosureAgent, PocValidatorAgent, ResearchOrchestrator, audit, checkout, prepare_poc
 
@@ -65,6 +66,11 @@ def main(argv: list[str] | None = None) -> int:
     report.add_argument("--limit", type=int, default=300)
     report.add_argument("--format", choices=["json", "html"], default="json")
     report.add_argument("--output", type=Path)
+    benchmark = commands.add_parser("benchmark", help="라벨된 로컬 코퍼스로 정적 탐지 성능 측정")
+    benchmark.add_argument("--corpus", type=Path, default=Path("benchmarks/corpus.json"))
+    benchmark.add_argument("--output", type=Path, default=Path("data/benchmarks/latest.json"))
+    benchmark.add_argument("--min-recall", type=float, default=0.0)
+    benchmark.add_argument("--max-false-positive-cases", type=int, default=1_000_000)
     research = commands.add_parser("audit", help="체크아웃의 코드 경로에서 보안 가설 찾기")
     research.add_argument("target", help="공개 GitHub URL 또는 로컬 체크아웃 경로")
     research.add_argument("--repo", help="로컬 경로의 owner/repo")
@@ -99,6 +105,16 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("후보 처리 상한은 1 이상이어야 합니다")
     if args.command == "research-run" and (args.max_pages < 1 or args.max_manifests < 1):
         parser.error("페이지 및 매니페스트 제한은 1 이상이어야 합니다")
+    if args.command == "benchmark":
+        if not 0 <= args.min_recall <= 1 or args.max_false_positive_cases < 0:
+            parser.error("벤치마크 기준값이 올바르지 않습니다")
+        try:
+            result = run_benchmark(args.corpus, args.output)
+            print(json.dumps({"output": str(args.output), "scope": result["scope"], "metrics": result["metrics"]}, ensure_ascii=False))
+            return 0 if benchmark_passes(result, args.min_recall, args.max_false_positive_cases) else 2
+        except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError) as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
     if args.command in {"audit", "research-run", "poc-init", "poc-verify", "disclosure"}:
         try:
             if args.command in {"audit", "research-run"}:
