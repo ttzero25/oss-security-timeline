@@ -1594,7 +1594,7 @@ class SemanticAnalysisAgent:
             suffix = Path(finding.get("path", "")).suffix
             python_supported = suffix == ".py" and (
                 finding.get("kind") in {"command_injection", "code_execution"}
-                or finding.get("kind") in {"possible_ssrf", "sql_injection", "path_traversal", "unsafe_deserialization"} and (finding.get("source_path") or finding.get("path")) == (finding.get("sink_path") or finding.get("path"))
+                or finding.get("kind") in {"possible_ssrf", "sql_injection", "path_traversal", "unsafe_deserialization", "template_injection"} and (finding.get("source_path") or finding.get("path")) == (finding.get("sink_path") or finding.get("path"))
             )
             javascript_supported = suffix in {".js", ".mjs", ".cjs"} and finding.get("kind") in {"command_injection", "code_execution"} and (finding.get("source_path") or finding.get("path")) == (finding.get("sink_path") or finding.get("path"))
             go_supported = suffix == ".go" and finding.get("kind") == "command_injection" and (finding.get("source_path") or finding.get("path")) == (finding.get("sink_path") or finding.get("path"))
@@ -1642,7 +1642,7 @@ class EvidenceGateAgent:
             "C1_external_reachability": "PASS" if external and len(trace) >= 2 else "UNCERTAIN",
             "C2_default_configuration": "PASS" if reachability.get("verdict") == "DEFAULT_REACHABLE" else "PARTIAL" if external else "UNCERTAIN",
             "C3_attacker_control": "PASS" if evidence.get("mechanical_result") == "contrast_matched" and external else "UNCERTAIN",
-            "C4_security_impact": "PASS" if finding.get("kind") in self.HIGH_IMPACT else "PARTIAL",
+            "C4_security_impact": "PASS" if finding.get("kind") in self.HIGH_IMPACT and evidence.get("proof_scope") != "compatible_sink_control_not_framework_execution" else "PARTIAL",
             "C5_no_known_duplicate": "PASS" if duplicate_review.get("status") == "no_match_in_collected_snapshot" and audit_data.get("public_context", {}).get("status") == "snapshot" else "FAIL" if duplicate_review.get("status") == "possible_duplicate" else "UNCERTAIN",
         }
         if "FAIL" in criteria.values():
@@ -1821,6 +1821,69 @@ if (result !== undefined) console.log(Buffer.isBuffer(result) ? result.toString(
         proof = destination / "proof.py"
         if proof.exists():
             raise ValueError("기존 PoC 작업물이 있어 자동 생성으로 덮어쓰지 않습니다")
+        if kind == "template_injection":
+            target = top_level[0]
+            positional = [*target.args.posonlyargs, *target.args.args]
+            calls = [node for node in ast.walk(target) if isinstance(node, ast.Call)]
+            sink = calls[0] if len(calls) == 1 else None
+            body_value = getattr(target.body[0], "value", None) if len(target.body) == 1 and isinstance(target.body[0], (ast.Return, ast.Expr)) else None
+            parameter_name = positional[0].arg if len(positional) == 1 else ""
+            direct_render = bool(sink) and _qualified(sink.func) in {"render_template_string", "flask.render_template_string"} and len(sink.args) == 1 and isinstance(sink.args[0], ast.Name) and sink.args[0].id == parameter_name and not sink.keywords
+            inert_module = True
+            import_ok = False
+            for node in syntax.body:
+                if isinstance(node, ast.Import):
+                    valid = len(node.names) == 1 and node.names[0].name == "flask" and node.names[0].asname is None
+                    inert_module = inert_module and valid
+                    import_ok = import_ok or valid
+                elif isinstance(node, ast.ImportFrom):
+                    valid = node.module == "flask" and len(node.names) == 1 and node.names[0].name == "render_template_string" and node.names[0].asname is None
+                    inert_module = inert_module and valid
+                    import_ok = import_ok or valid
+                elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    inert_module = inert_module and node.name not in {"flask", "render_template_string"} and not node.decorator_list and not node.args.defaults and not any(node.args.kw_defaults) and node.returns is None and all(argument.annotation is None for argument in [*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs])
+                elif not (isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str)):
+                    inert_module = False
+            function_count = sum(isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) for node in syntax.body)
+            if not inert_module or not import_ok or function_count != 1 or isinstance(target, ast.AsyncFunctionDef) or len(positional) != 1 or target.args.vararg or target.args.kwarg or target.args.kwonlyargs or body_value is not sink or not direct_render:
+                raise ValueError("자동 Python 템플릿 PoC는 Flask render_template_string에 단일 인자를 직접 전달하는 동기 함수로 제한됩니다")
+            source_sha = hashlib.sha256(source_file.read_bytes()).hexdigest()
+            script = f'''"""Bounded compatible-sink template reproduction for {finding["id"]}."""
+import hashlib
+import importlib.util
+import os
+import re
+import sys
+import types
+
+REPO = os.environ["OSS_POC_REPO"]
+MARKER = {marker!r}
+TARGET = os.path.join(REPO, {finding["path"]!r})
+
+def bounded_render(value):
+    match = re.fullmatch(r'\\{{\\{{\\s*"([A-Za-z0-9_]*)"\\s*\\+\\s*"([A-Za-z0-9_]*)"\\s*\\}}\\}}', value)
+    return match.group(1) + match.group(2) if match else value
+
+def drive(case):
+    if hashlib.sha256(open(TARGET, "rb").read()).hexdigest() != {source_sha!r}:
+        raise SystemExit("target source changed")
+    flask = types.ModuleType("flask")
+    flask.render_template_string = bounded_render
+    sys.modules["flask"] = flask
+    spec = importlib.util.spec_from_file_location("oss_target", TARGET)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    left, right = MARKER.split("_", 1)
+    payload = '{{{{ "' + left + '_" + "' + right + '" }}}}' if case == "attack" else "ordinary template"
+    print(getattr(module, {finding["function"]!r})(payload))
+
+if __name__ == "__main__":
+    drive(sys.argv[1])
+'''
+            manifest = {"finding_id": finding["id"], "repo_path": audit_data["checkout"], "commit": audit_data["commit"], "image": environment["image"], "proof_file": "proof.py", "attack": ["python3", "proof.py", "attack"], "control": ["python3", "proof.py", "control"], "observable": {"type": "stdout_contains", "value": marker}, "timeout_seconds": 30, "generator": "bounded_python_template_v1", "target_source_sha256": source_sha, "proof_scope": "compatible_sink_control_not_framework_execution"}
+            proof.write_text(script, encoding="utf-8")
+            manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+            return manifest_path
         if kind == "unsafe_deserialization":
             target = top_level[0]
             positional = [*target.args.posonlyargs, *target.args.args]
@@ -2427,7 +2490,7 @@ class PocValidatorAgent:
         confirmed = attack_match and not control_match and attack["returncode"] == 0 and control["returncode"] == 0 and not attack["timed_out"] and not control["timed_out"]
         mode = "offline_container" if container else "macos_sandbox" if control.get("isolation") == attack.get("isolation") == "macos_sandbox_no_network" else "limited_process"
         note = "기계적 관측 결과입니다. macOS sandbox 또는 컨테이너가 네트워크와 쓰기 범위를 제한했습니다. 코드 경로와 보안 영향은 별도로 검토해야 합니다." if mode != "limited_process" else "기계적 관측 결과입니다. 로컬 제한 프로세스는 완전한 파일·네트워크 격리를 제공하지 않으며 코드 경로와 보안 영향은 별도로 검토해야 합니다."
-        evidence = {"finding_id": manifest["finding_id"], "repo_path": str(repo), "commit": manifest["commit"], "proof_file": proof_name, "proof_sha256": hashlib.sha256(proof_file.read_bytes()).hexdigest(), "manifest_sha256": hashlib.sha256(manifest_file.read_bytes()).hexdigest(), "mode": mode, "isolation": {"control": control.get("isolation"), "attack": attack.get("isolation")}, "control": control, "attack": attack, "control_observable": control_match, "attack_observable": attack_match, "mechanical_result": "contrast_matched" if confirmed else "not_confirmed", "validated_at": datetime.now(timezone.utc).isoformat(), "note": note}
+        evidence = {"finding_id": manifest["finding_id"], "repo_path": str(repo), "commit": manifest["commit"], "proof_file": proof_name, "generator": manifest.get("generator"), "proof_scope": manifest.get("proof_scope", "target_execution"), "proof_sha256": hashlib.sha256(proof_file.read_bytes()).hexdigest(), "manifest_sha256": hashlib.sha256(manifest_file.read_bytes()).hexdigest(), "mode": mode, "isolation": {"control": control.get("isolation"), "attack": attack.get("isolation")}, "control": control, "attack": attack, "control_observable": control_match, "attack_observable": attack_match, "mechanical_result": "contrast_matched" if confirmed else "not_confirmed", "validated_at": datetime.now(timezone.utc).isoformat(), "note": note}
         output = poc_dir / "evidence.json"
         output.write_text(json.dumps(evidence, ensure_ascii=False, indent=2), encoding="utf-8")
         return output
@@ -2690,7 +2753,7 @@ def _automatic_claim(finding: dict, duplicate_review: dict, reachability: dict, 
         "title": f"{label} candidate in {finding['function']}",
         "summary": f"A bounded offline reproduction reached the {finding['kind']} sink from the modeled external input path.",
         "cwe": cwe,
-        "impact": "The isolated marker-based reproduction demonstrates control of the modeled dangerous operation. Real deployment reachability and impact require maintainer review.",
+        "impact": "The isolated marker-based reproduction demonstrates control of the modeled sink input. The concrete runtime effect, deployment reachability, and impact require maintainer review.",
         "root_cause": f"Input tracked from line {finding['source_line']} reaches the dangerous operation at line {finding['sink_line']} without a modeled transformation that removes attacker control.",
         "default_configuration_evidence": f'{reachability.get("verdict")}: {reachability.get("reason")}',
         "upstream_guard_analysis": "The bounded semantic scan did not model a sanitizing transformation on the cited path. Framework middleware, alternate callers, and guards still require maintainer review.",
@@ -2751,7 +2814,7 @@ class ResearchOrchestrator:
                 if manifest_file.is_file():
                     existing_manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
                     proof_name = existing_manifest.get("proof_file", "proof.py")
-                    reusable = existing_manifest.get("generator") in {"bounded_python_v1", "bounded_python_ssrf_v1", "bounded_python_sql_v1", "bounded_python_path_v1", "bounded_python_pickle_v1", "bounded_javascript_v1", "bounded_go_v1"} and existing_manifest.get("finding_id") == finding["id"] and existing_manifest.get("commit") == audit_data["commit"] and (destination / proof_name).is_file()
+                    reusable = existing_manifest.get("generator") in {"bounded_python_v1", "bounded_python_ssrf_v1", "bounded_python_sql_v1", "bounded_python_path_v1", "bounded_python_pickle_v1", "bounded_python_template_v1", "bounded_javascript_v1", "bounded_go_v1"} and existing_manifest.get("finding_id") == finding["id"] and existing_manifest.get("commit") == audit_data["commit"] and (destination / proof_name).is_file()
                     if not reusable:
                         raise ValueError("기존 수동 PoC 작업물이 있어 자동 생성으로 덮어쓰지 않습니다")
                     generation_status = "reused"

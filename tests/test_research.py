@@ -518,6 +518,23 @@ print(result.stdout)
             self.assertEqual(evidence["mechanical_result"], "contrast_matched")
             self.assertFalse(evidence["control_observable"])
 
+    def test_python_template_poc_records_compatible_sink_scope(self):
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)
+            repo = folder / "repo"
+            repo.mkdir()
+            (repo / "view.py").write_text('''from flask import render_template_string\n\ndef render(content):\n    return render_template_string(content)\n''', encoding="utf-8")
+            subprocess.run(["git", "init", "-q", str(repo)], check=True)
+            subprocess.run(["git", "-C", str(repo), "add", "view.py"], check=True)
+            subprocess.run(["git", "-C", str(repo), "-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "-qm", "fixture"], check=True)
+            audit_file = audit(repo, "fixture/python-template-poc", folder / "research")
+            audit_data = json.loads(audit_file.read_text())
+            finding = next(item for item in SemanticAnalysisAgent().run(audit_data["hypotheses"], audit_data["profile"]) if item["kind"] == "template_injection")
+            manifest_file = LimitedPocAgent().run(audit_file, finding, BuildEnvironmentAgent().run(repo, finding))
+            evidence = json.loads(PocValidatorAgent().run(manifest_file).read_text())
+            self.assertEqual(evidence["mechanical_result"], "contrast_matched")
+            self.assertEqual(evidence["proof_scope"], "compatible_sink_control_not_framework_execution")
+
     def test_go_limited_poc_runs_single_file_handler_with_contrast(self):
         with tempfile.TemporaryDirectory() as temp:
             folder = Path(temp)
