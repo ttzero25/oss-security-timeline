@@ -498,6 +498,26 @@ print(result.stdout)
             self.assertEqual(evidence["mechanical_result"], "contrast_matched")
             self.assertFalse(evidence["control_observable"])
 
+    def test_python_pickle_poc_uses_stdout_only_payload(self):
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)
+            repo = folder / "repo"
+            repo.mkdir()
+            (repo / "loader.py").write_text('''import pickle\n\ndef load(data):\n    return pickle.loads(data)\n''', encoding="utf-8")
+            subprocess.run(["git", "init", "-q", str(repo)], check=True)
+            subprocess.run(["git", "-C", str(repo), "add", "loader.py"], check=True)
+            subprocess.run(["git", "-C", str(repo), "-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "-qm", "fixture"], check=True)
+            audit_file = audit(repo, "fixture/python-pickle-poc", folder / "research")
+            audit_data = json.loads(audit_file.read_text())
+            finding = next(item for item in SemanticAnalysisAgent().run(audit_data["hypotheses"], audit_data["profile"]) if item["kind"] == "unsafe_deserialization")
+            self.assertTrue(finding["auto_reproduction_supported"])
+            manifest_file = LimitedPocAgent().run(audit_file, finding, BuildEnvironmentAgent().run(repo, finding))
+            manifest = json.loads(manifest_file.read_text())
+            self.assertEqual(manifest["payload_effect"], "stdout_marker_only")
+            evidence = json.loads(PocValidatorAgent().run(manifest_file).read_text())
+            self.assertEqual(evidence["mechanical_result"], "contrast_matched")
+            self.assertFalse(evidence["control_observable"])
+
     def test_go_limited_poc_runs_single_file_handler_with_contrast(self):
         with tempfile.TemporaryDirectory() as temp:
             folder = Path(temp)
