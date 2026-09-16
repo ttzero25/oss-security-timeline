@@ -105,6 +105,15 @@ class ResearchTests(unittest.TestCase):
             findings, _ = SourceScanAgent().run(root, "fixture/javascript-scope", "2" * 40)
             self.assertEqual(findings, [])
 
+    def test_javascript_scan_models_exported_default_destructured_input(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "tool.ts").write_text('''import { execSync } from "node:child_process";\nexport default async function run({\n  command,\n}: {\n  command: string;\n}): Promise<void> {\n  execSync(`tool ${command}`);\n}\n''', encoding="utf-8")
+            findings, _ = SourceScanAgent().run(root, "fixture/typescript-tool", "5" * 40)
+            self.assertEqual(len(findings), 1)
+            self.assertEqual(findings[0].kind, "command_injection")
+            self.assertEqual(findings[0].function, "run")
+
     def test_go_scan_traces_local_package_function(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

@@ -98,7 +98,7 @@ class DashboardTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             folder = Path(temp)
             path = folder / "latest.json"
-            path.write_text(json.dumps({"schema_version": 1, "corpus_version": "fixture-1", "generated_at": "2026-09-16T00:00:00Z", "scope": "static only", "metrics": {"total_cases": 10, "vulnerable_cases": 6, "clean_cases": 4, "true_positive_cases": 6, "false_positive_cases": 1, "true_negative_cases": 3, "recall_at_case_limit": 1.0, "case_precision": 0.8571, "clean_specificity": 0.75, "pass_rate": 0.9}}), encoding="utf-8")
+            path.write_text(json.dumps({"schema_version": 1, "corpus_version": "fixture-1", "generated_at": "2026-09-16T00:00:00Z", "scope": "static only", "metrics": {"total_cases": 10, "vulnerable_cases": 6, "clean_cases": 4, "true_positive_cases": 6, "false_positive_cases": 1, "true_negative_cases": 3, "recall_at_case_limit": 1.0, "case_precision": 0.8571, "clean_specificity": 0.75, "pass_rate": 0.9, "by_origin": {"historical": {"cases": 2}}, "historical_pairs_total": 1, "historical_pairs_passed": 1}}), encoding="utf-8")
             benchmark = benchmark_snapshot(path)
             store = Store(folder / "db.sqlite3")
             rendered = summary(store.report(), [], benchmark)
@@ -106,6 +106,8 @@ class DashboardTests(unittest.TestCase):
             self.assertIn("정적 탐지 기준선", rendered)
             self.assertIn("100.0%", rendered)
             self.assertIn("오탐 사례 1건", rendered)
+            self.assertIn("공개 취약/수정 쌍", rendered)
+            self.assertIn("출처 고정 사례 2개", rendered)
             self.assertIn("실제 저장소 성능을 대신하지 않습니다", rendered)
 
     def test_graph_links_repo_advisory_cve_cwe_and_package(self):

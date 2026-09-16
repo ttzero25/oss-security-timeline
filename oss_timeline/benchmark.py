@@ -26,9 +26,13 @@ def run_benchmark(manifest_file: Path, output_file: Path | None = None) -> dict:
     for raw in data["cases"]:
         case_id = str(raw.get("id") or "")
         expectation = raw.get("expectation")
+        origin = raw.get("origin", "synthetic")
         expected_kinds = set(raw.get("expected_kinds") or [])
-        if not case_id or case_id in seen_ids or expectation not in {"vulnerable", "clean"}:
+        if not case_id or case_id in seen_ids or expectation not in {"vulnerable", "clean"} or origin not in {"synthetic", "historical"}:
             raise ValueError("벤치마크 사례 ID 또는 expectation이 올바르지 않습니다")
+        provenance = raw.get("provenance") or {}
+        if origin == "historical" and (not raw.get("pair_id") or any(not provenance.get(key) for key in ("advisory", "repository", "ref", "source_path", "snapshot_type"))):
+            raise ValueError(f"{case_id}: 실제 공개 사례에는 pair_id와 provenance가 필요합니다")
         if expectation == "vulnerable" and not expected_kinds:
             raise ValueError(f"{case_id}: 취약 사례에는 expected_kinds가 필요합니다")
         seen_ids.add(case_id)
@@ -50,6 +54,9 @@ def run_benchmark(manifest_file: Path, output_file: Path | None = None) -> dict:
         cases.append({
             "id": case_id,
             "description": str(raw.get("description") or ""),
+            "origin": origin,
+            "pair_id": str(raw.get("pair_id") or ""),
+            "provenance": provenance,
             "expectation": expectation,
             "expected_kinds": sorted(expected_kinds),
             "found_kinds": sorted(found_kinds),
@@ -68,6 +75,15 @@ def run_benchmark(manifest_file: Path, output_file: Path | None = None) -> dict:
     false_negative = len(vulnerable) - true_positive
     true_negative = sum(case["passed"] for case in clean)
     false_positive = len(clean) - true_negative
+    by_origin = {}
+    for origin in ("synthetic", "historical"):
+        selected = [case for case in cases if case["origin"] == origin]
+        by_origin[origin] = {"cases": len(selected), "passed": sum(case["passed"] for case in selected), "pass_rate": _ratio(sum(case["passed"] for case in selected), len(selected))}
+    historical_pairs: dict[str, list[dict]] = {}
+    for case in cases:
+        if case["origin"] == "historical":
+            historical_pairs.setdefault(case["pair_id"], []).append(case)
+    complete_pairs = [pair for pair in historical_pairs.values() if {case["expectation"] for case in pair} == {"vulnerable", "clean"}]
     metrics = {
         "total_cases": len(cases),
         "vulnerable_cases": len(vulnerable),
@@ -80,6 +96,9 @@ def run_benchmark(manifest_file: Path, output_file: Path | None = None) -> dict:
         "case_precision": _ratio(true_positive, true_positive + false_positive),
         "clean_specificity": _ratio(true_negative, len(clean)),
         "pass_rate": _ratio(true_positive + true_negative, len(cases)),
+        "by_origin": by_origin,
+        "historical_pairs_total": len(complete_pairs),
+        "historical_pairs_passed": sum(all(case["passed"] for case in pair) for pair in complete_pairs),
     }
     result = {
         "schema_version": 1,

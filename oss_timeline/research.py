@@ -657,32 +657,49 @@ def _js_refs(value: str) -> set[str]:
 def _js_function_blocks(lines: list[str]) -> list[dict]:
     """Extract ordinary named function bodies without pretending to be a full JS parser."""
     starts = [
-        re.compile(r"\b(?:export\s+)?(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(([^)]*)\)"),
-        re.compile(r"\b(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?\(([^)]*)\)\s*=>"),
+        re.compile(r"\b(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(([^)]*)\)", re.S),
+        re.compile(r"\b(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?\(([^)]*)\)\s*=>", re.S),
     ]
     output = []
     for index, line in enumerate(lines):
+        header = "\n".join(lines[index : min(len(lines), index + 16)])
         match = None
         for candidate in starts:
-            match = candidate.search(line)
+            match = candidate.search(header)
             if match:
                 break
-        if not match or "{" not in line[match.end():]:
+        if not match:
             continue
+        if match.start() and "\n" in header[:match.start()]:
+            continue
+        remainder = header[match.end():]
+        body_offset = remainder.find("{")
+        if body_offset < 0:
+            continue
+        before_body = header[: match.end() + body_offset]
+        body_line = index + before_body.count("\n")
+        body_column = len(before_body.rsplit("\n", 1)[-1])
         depth = 0
-        end = index
-        for cursor in range(index, len(lines)):
-            code = re.sub(r"(['\"])(?:\\.|(?!\1).)*\1", "", lines[cursor].split("//", 1)[0])
+        end = body_line
+        for cursor in range(body_line, len(lines)):
+            raw = lines[cursor][body_column:] if cursor == body_line else lines[cursor]
+            code = re.sub(r"(['\"])(?:\\.|(?!\1).)*\1", "", raw.split("//", 1)[0])
             depth += code.count("{") - code.count("}")
             end = cursor
             if depth <= 0:
                 break
         parameters = []
-        for raw in match.group(2).split(","):
-            name = re.match(r"\s*([A-Za-z_$][\w$]*)", raw)
-            if name:
-                parameters.append(name.group(1))
-        output.append({"name": match.group(1), "parameters": parameters, "start": index, "end": end})
+        raw_parameters = match.group(2)
+        if raw_parameters.lstrip().startswith("{"):
+            destructured = raw_parameters.split("}:", 1)[0]
+            parameters = list(dict.fromkeys(re.findall(r"\b[A-Za-z_$][\w$]*\b", destructured)))
+        else:
+            for raw in raw_parameters.split(","):
+                name = re.match(r"\s*([A-Za-z_$][\w$]*)", raw)
+                if name:
+                    parameters.append(name.group(1))
+        external_parameters = parameters if re.search(r"\bexport\s+default\b", match.group(0)) else []
+        output.append({"name": match.group(1), "parameters": parameters, "external_parameters": external_parameters, "start": index, "end": end})
     return output
 
 
@@ -749,7 +766,8 @@ def _javascript_multihop_hypotheses(files: list[Path], root: Path, repo: str, co
         return local if local in functions else None
 
     def analyze(info: dict) -> tuple[dict[str, tuple[str, int, str]], list[dict], list[dict]]:
-        origins = {name: (name, info["start"] + 1, info["lines"][info["start"]]) for name in info["parameters"]}
+        external = set(info.get("external_parameters", []))
+        origins = {name: ("__external__" if name in external else name, info["start"] + 1, info["lines"][info["start"]]) for name in info["parameters"]}
         sinks, calls = [], []
         for offset in range(info["start"], info["end"] + 1):
             line, number = info["lines"][offset], offset + 1
