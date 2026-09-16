@@ -517,6 +517,25 @@ print(result.stdout)
             evidence = json.loads(PocValidatorAgent().run(manifest_file).read_text())
             self.assertEqual(evidence["mechanical_result"], "contrast_matched")
 
+    @unittest.skipUnless(shutil.which("clang") or shutil.which("cc"), "C sanitizer compiler is required")
+    def test_native_sanitizer_poc_contrasts_direct_argv_overflow(self):
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)
+            repo = folder / "repo"
+            repo.mkdir()
+            (repo / "main.c").write_text('''#include <string.h>\nint main(int argc, char **argv) {\n  char target[8];\n  strcpy(target, argv[1]);\n  return target[0] == 0;\n}\n''', encoding="utf-8")
+            subprocess.run(["git", "init", "-q", str(repo)], check=True)
+            subprocess.run(["git", "-C", str(repo), "add", "main.c"], check=True)
+            subprocess.run(["git", "-C", str(repo), "-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "-qm", "fixture"], check=True)
+            audit_file = audit(repo, "fixture/native-sanitizer", folder / "research")
+            audit_data = json.loads(audit_file.read_text())
+            finding = next(item for item in SemanticAnalysisAgent().run(audit_data["hypotheses"], audit_data["profile"]) if item["kind"] == "unsafe_copy")
+            environment = BuildEnvironmentAgent().run(repo, finding)
+            self.assertEqual(environment["runtime"], "native_sanitizer")
+            manifest_file = LimitedPocAgent().run(audit_file, finding, environment)
+            evidence = json.loads(PocValidatorAgent().run(manifest_file).read_text())
+            self.assertEqual(evidence["mechanical_result"], "contrast_matched")
+
     def test_python_ssrf_poc_stubs_network_and_runs_real_function(self):
         with tempfile.TemporaryDirectory() as temp:
             folder = Path(temp)

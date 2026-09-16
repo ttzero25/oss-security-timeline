@@ -435,7 +435,7 @@ def home(report: dict, stats: dict, audits: list[dict], agents: list[dict]) -> s
 
 def lab(selected: str | None, report: dict | None, audits: list[dict], job: dict | None, error: str | None, comparisons: dict, fix_year: str = "", fix_month: str = "") -> str:
     value = esc("https://github.com/" + selected) if selected else ""
-    capabilities = "".join(f"<span>{esc(label)}</span>" for label in ("명령·코드 실행", "SSRF · 네트워크 스텁", "SQL · DB 스텁", "경로 조작 · scratch", "pickle · stdout 전용", "템플릿 sink · 범위 표시"))
+    capabilities = "".join(f"<span>{esc(label)}</span>" for label in ("명령·코드 실행", "SSRF · 네트워크 스텁", "SQL · DB 스텁", "경로 조작 · scratch", "pickle · stdout 전용", "템플릿 sink · 범위 표시", "C/C++ · ASan/UBSan"))
     form = f'''<form method="post" action="/lab/start" class="repo-form"><label for="repo">GitHub 오픈소스 저장소</label><div class="input-row"><input id="repo" name="repo" type="url" value="{value}" placeholder="https://github.com/owner/repo" autocomplete="url" required><button class="button" type="submit">수집 · 심층 조사 시작 ↗</button></div><small>공개 GitHub 저장소만 허용합니다. 지원되는 제한 PoC는 로컬에서 대조하지만 제보는 자동 제출하지 않습니다.</small><div class="capability-list" aria-label="제한 자동 재현 범위">{capabilities}</div></form>'''
     notice = f'<div class="notice error">{esc(error)}</div>' if error else ""
     running = bool(job and job["status"] == "running")

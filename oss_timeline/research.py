@@ -1659,7 +1659,8 @@ class SemanticAnalysisAgent:
             )
             javascript_supported = suffix in {".js", ".mjs", ".cjs", ".ts", ".mts", ".cts"} and finding.get("kind") in {"command_injection", "code_execution"} and (finding.get("source_path") or finding.get("path")) == (finding.get("sink_path") or finding.get("path"))
             go_supported = suffix == ".go" and finding.get("kind") == "command_injection" and (finding.get("source_path") or finding.get("path")) == (finding.get("sink_path") or finding.get("path"))
-            supported = python_supported or javascript_supported or go_supported
+            native_supported = suffix in C_EXTENSIONS and finding.get("kind") in {"buffer_overflow", "unsafe_copy"} and finding.get("function") == "main" and (finding.get("source_path") or finding.get("path")) == (finding.get("sink_path") or finding.get("path"))
+            supported = python_supported or javascript_supported or go_supported or native_supported
             score = self.SCORES.get(finding.get("kind"), 40)
             reasons = [f"{finding.get('kind')} 기본 위험도 {score}"]
             if finding.get("function") and finding["function"] != "javascript_scope_unknown":
@@ -1677,7 +1678,7 @@ class SemanticAnalysisAgent:
             score += path_adjustment
             if path_reason:
                 reasons.append(path_reason)
-            runtime = "Python" if python_supported else "JavaScript/TypeScript" if javascript_supported else "Go" if go_supported else ""
+            runtime = "Python" if python_supported else "JavaScript/TypeScript" if javascript_supported else "Go" if go_supported else "C/C++ sanitizer" if native_supported else ""
             output.append({**finding, "priority": max(0, min(score, 100)), "priority_reasons": reasons, "path_tier": path_tier, "auto_reproduction_supported": supported, "automation_reason": f"제한된 {runtime} 실제 함수 호출 템플릿 지원" if supported else "이 언어·취약점 유형의 안전한 자동 PoC 템플릿이 없음"})
         return sorted(output, key=lambda item: (-item["priority"], item.get("path", ""), item.get("sink_line", 0)))
 
@@ -1820,6 +1821,11 @@ class BuildEnvironmentAgent:
                 return {"status": "unsupported", "reason": "로컬 Go 런타임을 찾지 못했습니다"}
             manifests = [name for name in ("go.mod", "go.sum") if (checkout_root / name).is_file()]
             return {"status": "ready", "runtime": "go", "executable": executable, "image": "golang:1.26-alpine", "manifests": manifests, "default_execution": "limited_process", "dependency_install": "disabled"}
+        if suffix in C_EXTENSIONS:
+            executable = shutil.which("clang") or shutil.which("cc")
+            if not executable:
+                return {"status": "unsupported", "runtime": "native_sanitizer", "reason": "ASan/UBSan 빌드에 사용할 clang/cc를 찾지 못했습니다"}
+            return {"status": "ready", "runtime": "native_sanitizer", "executable": executable, "image": "clang:latest", "manifests": [name for name in ("CMakeLists.txt", "Makefile") if (checkout_root / name).is_file()], "default_execution": "limited_process", "dependency_install": "disabled", "sanitizers": ["address", "undefined"]}
         return {"status": "unsupported", "reason": "현재 자동 빌드 환경은 제한된 Python·JavaScript/TypeScript·Go 후보만 지원합니다"}
 
 
@@ -1840,6 +1846,53 @@ class LimitedPocAgent:
             raise ValueError("기존 PoC 작업물이 있어 자동 생성으로 덮어쓰지 않습니다")
         marker = "OSS_PROOF_" + secrets.token_hex(8)
         kind = finding["kind"]
+        if environment.get("runtime") == "native_sanitizer":
+            source_text = source_file.read_text(encoding="utf-8")
+            allowed_headers = {"stdio.h", "stdlib.h", "string.h", "stdint.h", "stddef.h", "limits.h"}
+            headers = set(re.findall(r"^\s*#\s*include\s*[<\"]([^>\"]+)[>\"]", source_text, re.M))
+            forbidden_effects = re.search(r"\b(?:system|popen|fork|exec\w*|socket|connect|listen|accept|open|fopen|unlink|remove|rename)\s*\(", source_text)
+            main_signature = re.search(r"\b(?:int|signed)\s+main\s*\(\s*int\s+\w+\s*,\s*char\s*\*\s*\*?\s*\w+", source_text)
+            if source_file.suffix not in {".c", ".cc", ".cpp", ".cxx"} or not main_signature or headers - allowed_headers or forbidden_effects:
+                raise ValueError("자동 네이티브 PoC는 허용 헤더만 사용하고 외부 효과가 없는 단일 main(argc, argv) 소스로 제한됩니다")
+            proof = destination / "proof.py"
+            if proof.exists():
+                raise ValueError("기존 PoC 작업물이 있어 자동 생성으로 덮어쓰지 않습니다")
+            source_sha = hashlib.sha256(source_file.read_bytes()).hexdigest()
+            compiler = environment["executable"]
+            script = f'''"""Scratch-only ASan/UBSan contrast for {finding["id"]}."""
+import hashlib
+import os
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+repo = Path(os.environ["OSS_POC_REPO"])
+scratch = Path(os.environ["OSS_POC_SCRATCH"])
+source = repo / {finding["path"]!r}
+if hashlib.sha256(source.read_bytes()).hexdigest() != {source_sha!r}:
+    raise SystemExit("target source changed")
+copied = scratch / ("target" + source.suffix)
+binary = scratch / "target-bin"
+shutil.copy2(source, copied)
+compile_result = subprocess.run([{compiler!r}, "-O0", "-g", "-fsanitize=address,undefined", "-fno-omit-frame-pointer", str(copied), "-o", str(binary)], capture_output=True, text=True, timeout=20)
+if compile_result.returncode:
+    print(compile_result.stderr, file=sys.stderr)
+    raise SystemExit("sanitizer build failed")
+payload = "A" * 4096 if sys.argv[1] == "attack" else "A"
+run = subprocess.run([str(binary), payload], capture_output=True, text=True, timeout=10, env={{"PATH": os.environ.get("PATH", ""), "ASAN_OPTIONS": "detect_leaks=0:abort_on_error=1", "UBSAN_OPTIONS": "halt_on_error=1"}})
+diagnostic = run.stderr
+observed = any(token in diagnostic for token in ("AddressSanitizer", "stack-buffer-overflow", "runtime error:"))
+if sys.argv[1] == "attack" and observed:
+    print({marker!r})
+elif sys.argv[1] == "control" and observed:
+    print("unexpected sanitizer finding in control", file=sys.stderr)
+    raise SystemExit(1)
+'''
+            manifest = {"finding_id": finding["id"], "repo_path": audit_data["checkout"], "commit": audit_data["commit"], "image": environment["image"], "proof_file": "proof.py", "attack": ["python3", "proof.py", "attack"], "control": ["python3", "proof.py", "control"], "observable": {"type": "stdout_contains", "value": marker}, "timeout_seconds": 45, "generator": "bounded_native_sanitizer_v1", "target_source_sha256": source_sha, "proof_scope": "target_execution", "sanitizers": environment["sanitizers"], "filesystem_policy": "compile_and_execute_in_scratch"}
+            proof.write_text(script, encoding="utf-8")
+            manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+            return manifest_path
         if environment.get("runtime") == "go":
             try:
                 source_text = source_file.read_text(encoding="utf-8")
@@ -2882,8 +2935,9 @@ class DuplicateReviewAgent:
         "toctou_candidate": {"TOCTOU", "race condition", "CWE-367"},
         "workflow_injection": {"GitHub Actions", "workflow injection", "pull_request_target", "CWE-829"},
         "buffer_overflow": {"stack buffer overflow", "out-of-bounds write", "memory corruption", "CWE-121"},
+        "unsafe_copy": {"buffer overflow", "unsafe copy", "out-of-bounds write", "CWE-120"},
     }
-    CWE = {"buffer_overflow": "CWE-121", "command_injection": "CWE-78", "workflow_injection": "CWE-829", "authentication_bypass": "CWE-347", "privilege_assignment": "CWE-266", "authorization_scope_candidate": "CWE-639", "concurrency_race_candidate": "CWE-362", "toctou_candidate": "CWE-367", "code_execution": "CWE-94", "unsafe_deserialization": "CWE-502", "possible_ssrf": "CWE-918", "sql_injection": "CWE-89", "template_injection": "CWE-1336", "path_traversal": "CWE-22"}
+    CWE = {"buffer_overflow": "CWE-121", "unsafe_copy": "CWE-120", "command_injection": "CWE-78", "workflow_injection": "CWE-829", "authentication_bypass": "CWE-347", "privilege_assignment": "CWE-266", "authorization_scope_candidate": "CWE-639", "concurrency_race_candidate": "CWE-362", "toctou_candidate": "CWE-367", "code_execution": "CWE-94", "unsafe_deserialization": "CWE-502", "possible_ssrf": "CWE-918", "sql_injection": "CWE-89", "template_injection": "CWE-1336", "path_traversal": "CWE-22"}
 
     def run(self, audit_data: dict, finding: dict) -> dict:
         context = audit_data.get("public_context", {})
@@ -2932,8 +2986,8 @@ class DuplicateReviewAgent:
 
 
 def _automatic_claim(finding: dict, duplicate_review: dict, reachability: dict, evidence_gate: dict) -> dict:
-    cwe = {"buffer_overflow": "CWE-121", "command_injection": "CWE-78", "workflow_injection": "CWE-829", "authentication_bypass": "CWE-347", "privilege_assignment": "CWE-266", "authorization_scope_candidate": "CWE-639", "concurrency_race_candidate": "CWE-362", "toctou_candidate": "CWE-367", "code_execution": "CWE-94", "sql_injection": "CWE-89", "unsafe_deserialization": "CWE-502", "possible_ssrf": "CWE-918", "path_traversal": "CWE-22"}.get(finding["kind"], "CWE pending review")
-    label = {"buffer_overflow": "Stack buffer overflow candidate", "command_injection": "Command injection", "workflow_injection": "Workflow trust-boundary injection", "authentication_bypass": "Authentication verification bypass", "privilege_assignment": "Untrusted privilege assignment", "authorization_scope_candidate": "Authorization scope bypass candidate", "concurrency_race_candidate": "Unsynchronized security-state race candidate", "toctou_candidate": "TOCTOU race candidate", "code_execution": "Code execution", "sql_injection": "SQL injection", "possible_ssrf": "Server-side request forgery candidate", "path_traversal": "Path traversal candidate", "unsafe_deserialization": "Unsafe deserialization"}.get(finding["kind"], finding["kind"])
+    cwe = {"buffer_overflow": "CWE-121", "unsafe_copy": "CWE-120", "command_injection": "CWE-78", "workflow_injection": "CWE-829", "authentication_bypass": "CWE-347", "privilege_assignment": "CWE-266", "authorization_scope_candidate": "CWE-639", "concurrency_race_candidate": "CWE-362", "toctou_candidate": "CWE-367", "code_execution": "CWE-94", "sql_injection": "CWE-89", "unsafe_deserialization": "CWE-502", "possible_ssrf": "CWE-918", "path_traversal": "CWE-22"}.get(finding["kind"], "CWE pending review")
+    label = {"buffer_overflow": "Stack buffer overflow candidate", "unsafe_copy": "Unbounded memory copy", "command_injection": "Command injection", "workflow_injection": "Workflow trust-boundary injection", "authentication_bypass": "Authentication verification bypass", "privilege_assignment": "Untrusted privilege assignment", "authorization_scope_candidate": "Authorization scope bypass candidate", "concurrency_race_candidate": "Unsynchronized security-state race candidate", "toctou_candidate": "TOCTOU race candidate", "code_execution": "Code execution", "sql_injection": "SQL injection", "possible_ssrf": "Server-side request forgery candidate", "path_traversal": "Path traversal candidate", "unsafe_deserialization": "Unsafe deserialization"}.get(finding["kind"], finding["kind"])
     claim = claim_template(finding)
     matches = ", ".join(item.get("id") or item.get("ghsa") or item.get("cve") or "unknown" for item in duplicate_review["matches"])
     duplicate_text = f"Potential matches require human comparison: {matches}" if matches else f'No keyword match among {duplicate_review["checked"]} collected advisories; broader manual search is still required.'
@@ -2946,7 +3000,7 @@ def _automatic_claim(finding: dict, duplicate_review: dict, reachability: dict, 
         "default_configuration_evidence": f'{reachability.get("verdict")}: {reachability.get("reason")}',
         "upstream_guard_analysis": "The bounded semantic scan did not model a sanitizing transformation on the cited path. Framework middleware, alternate callers, and guards still require maintainer review.",
         "negative_control_explanation": "The benign input completed without the unique attack marker; only the crafted input produced it.",
-        "remediation": {"sql_injection": "Use parameterized statements and bind attacker-controlled values separately from SQL syntax.", "possible_ssrf": "Allowlist outbound schemes and destinations, reject private or link-local targets after resolution, and revalidate redirects.", "path_traversal": "Resolve the requested path against a fixed base directory and reject any result outside that base before opening it.", "unsafe_deserialization": "Do not unpickle attacker-controlled data; use a non-executable structured format with strict schema validation."}.get(finding["kind"], "Avoid interpreting attacker-controlled text as code or a shell command; use fixed operations and validated structured arguments."),
+        "remediation": {"sql_injection": "Use parameterized statements and bind attacker-controlled values separately from SQL syntax.", "possible_ssrf": "Allowlist outbound schemes and destinations, reject private or link-local targets after resolution, and revalidate redirects.", "path_traversal": "Resolve the requested path against a fixed base directory and reject any result outside that base before opening it.", "unsafe_deserialization": "Do not unpickle attacker-controlled data; use a non-executable structured format with strict schema validation.", "unsafe_copy": "Replace unbounded copy operations with capacity-aware APIs and validate the input length against the destination size before copying.", "buffer_overflow": "Validate attacker-controlled lengths against the actual destination capacity and use bounded memory operations."}.get(finding["kind"], "Avoid interpreting attacker-controlled text as code or a shell command; use fixed operations and validated structured arguments."),
         "reproduction_steps": ["Use the pinned analyzed commit", "Run the supplied resource-limited PoC verifier", "Compare benign and crafted observations"],
     })
     claim["affected"] = {"ecosystem": "source", "package": finding["repo"], "versions": f'analyzed commit {finding["commit"]}', "patched_version": "Not yet available"}
@@ -3002,7 +3056,7 @@ class ResearchOrchestrator:
                 if manifest_file.is_file():
                     existing_manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
                     proof_name = existing_manifest.get("proof_file", "proof.py")
-                    reusable = existing_manifest.get("generator") in {"bounded_python_v1", "bounded_python_ssrf_v1", "bounded_python_sql_v1", "bounded_python_path_v1", "bounded_python_pickle_v1", "bounded_python_template_v1", "bounded_javascript_v1", "bounded_typescript_v1", "bounded_go_v1"} and existing_manifest.get("finding_id") == finding["id"] and existing_manifest.get("commit") == audit_data["commit"] and (destination / proof_name).is_file()
+                    reusable = existing_manifest.get("generator") in {"bounded_python_v1", "bounded_python_ssrf_v1", "bounded_python_sql_v1", "bounded_python_path_v1", "bounded_python_pickle_v1", "bounded_python_template_v1", "bounded_javascript_v1", "bounded_typescript_v1", "bounded_go_v1", "bounded_native_sanitizer_v1"} and existing_manifest.get("finding_id") == finding["id"] and existing_manifest.get("commit") == audit_data["commit"] and (destination / proof_name).is_file()
                     if not reusable:
                         raise ValueError("기존 수동 PoC 작업물이 있어 자동 생성으로 덮어쓰지 않습니다")
                     generation_status = "reused"
