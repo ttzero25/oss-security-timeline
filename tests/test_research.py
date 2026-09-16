@@ -339,6 +339,23 @@ class ResearchTests(unittest.TestCase):
             self.assertEqual(coverage["priority_files_scanned"], 1)
             self.assertEqual(coverage["files_skipped_by_limit"], 1)
 
+    def test_complete_audit_merges_deterministic_file_shards(self):
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)
+            repo = folder / "repo"
+            repo.mkdir()
+            for index in range(3):
+                (repo / f"runner_{index}.py").write_text(f'import os\ndef run_{index}(command):\n    return os.system(command)\n', encoding="utf-8")
+            subprocess.run(["git", "init", "-q", str(repo)], check=True)
+            subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+            subprocess.run(["git", "-C", str(repo), "-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "-qm", "fixture"], check=True)
+            audit_file = audit(repo, "fixture/shards", folder / "research", max_files=1, complete_scan=True)
+            result = json.loads(audit_file.read_text())
+            self.assertEqual(result["coverage"]["files_inspected"], 3)
+            self.assertEqual(result["coverage"]["shard_count"], 3)
+            self.assertEqual(result["coverage"]["files_skipped_by_limit"], 0)
+            self.assertEqual(len(result["hypotheses"]), 3)
+
     def test_audit_reuses_only_clean_same_commit_scan(self):
         with tempfile.TemporaryDirectory() as temp:
             folder = Path(temp)

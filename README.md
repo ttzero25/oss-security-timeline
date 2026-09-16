@@ -83,6 +83,12 @@ Python 3.11 이상이 필요합니다. 기본 CLI와 웹 화면에는 추가 Pyt
 python3 -m oss_timeline research-run https://github.com/owner/repo --max-candidates 3
 ```
 
+지원 파일이 기본 20,000개 상한을 넘는 대형 저장소는 CLI에서 명시적으로 전체 샤드 순회를 요청할 수 있습니다. `--max-files`는 이때 한 샤드의 크기가 되며, 웹의 기본 실행은 응답 시간과 자원 사용을 위해 기존 상한을 유지합니다.
+
+```sh
+python3 -m oss_timeline research-run https://github.com/owner/repo --complete-scan --max-files 20000 --max-candidates 3
+```
+
 이미 생성된 `audit.json`을 재수집·재스캔 없이 최신 후보 선별 및 제한 PoC 엔진으로 다시 검증할 수도 있습니다.
 
 ```sh
@@ -118,7 +124,7 @@ python3 -m oss_timeline disclosure path/to/audit.json FIND-XXXXXXXXXXXX \
 
 ## 결과를 해석할 때
 
-“전수”는 접근 가능한 공개 API 페이지와 설정한 수집 상한 안에서의 전수를 뜻합니다. 기본 브랜치 밖의 커밋, 삭제된 과거 패키지, CVE 전체 등록부의 모든 항목은 포함되지 않을 수 있습니다. API 실패·페이지 제한·Git 트리 잘림은 결과의 `coverage`와 `warnings`에 표시됩니다. 공지 수정 이력은 정기 관측을 시작한 시점부터 기록합니다.
+“전수”는 접근 가능한 공개 API 페이지와 설정한 수집 상한 안에서의 전수를 뜻합니다. 코드 조사는 `--complete-scan`을 지정한 경우에만 지원 파일을 결정적 샤드로 끝까지 순회합니다. 기본 브랜치 밖의 커밋, 삭제된 과거 패키지, CVE 전체 등록부의 모든 항목은 포함되지 않을 수 있습니다. API 실패·페이지 제한·Git 트리 잘림은 결과의 `coverage`와 `warnings`에 표시됩니다. 공지 수정 이력은 정기 관측을 시작한 시점부터 기록합니다.
 
 수치 예측은 과거 **공개 보안 공지 게시 건수**로 향후 12개월을 추정합니다. 공개 공지 5건과 관측 기간 24개월 미만이면 산출하지 않으며, 관측할 수 없는 미공개 제로데이 발생 수는 예측하지 않습니다. 코드 스캔의 빈 결과도 안전성의 증거가 아닙니다.
 

@@ -1580,7 +1580,7 @@ def _c_hypotheses(filename: Path, root: Path, repo: str, commit: str) -> list[Hy
 
 class SourceScanAgent:
     """Conservative entry-to-sink hypotheses, not vulnerability verdicts."""
-    def run(self, root: Path, repo: str, commit: str, max_files: int = 20_000, priority_paths: set[str] | None = None) -> tuple[list[Hypothesis], dict]:
+    def run(self, root: Path, repo: str, commit: str, max_files: int = 20_000, priority_paths: set[str] | None = None, offset: int = 0) -> tuple[list[Hypothesis], dict]:
         root = root.resolve()
         if not root.is_dir():
             raise ValueError("조사 대상 디렉터리가 없습니다")
@@ -1601,8 +1601,8 @@ class SourceScanAgent:
             supported_files.append(filename)
         priority_paths = {Path(path).as_posix() for path in (priority_paths or set())}
         supported_files.sort(key=lambda item: (item.relative_to(root).as_posix() not in priority_paths, item.relative_to(root).as_posix()))
-        selected_files = supported_files[:max(0, max_files)]
-        truncated = len(selected_files) < len(supported_files)
+        selected_files = supported_files[max(0, offset) : max(0, offset) + max(0, max_files)]
+        truncated = offset > 0 or offset + len(selected_files) < len(supported_files)
         priority_scanned = 0
         for filename in selected_files:
             if filename.relative_to(root).as_posix() in priority_paths:
@@ -1628,7 +1628,7 @@ class SourceScanAgent:
         output.extend(_python_multihop_hypotheses(python_files[:multihop_limit], root, repo, commit))
         output.extend(_javascript_multihop_hypotheses(javascript_files[:javascript_limit], root, repo, commit))
         output.extend(_go_multihop_hypotheses(go_files[:go_limit], root, repo, commit))
-        return sorted({x.id: x for x in output}.values(), key=lambda x: (x.path, x.sink_line)), {"files_inspected": len(selected_files), "eligible_files": len(supported_files), "files_skipped_by_limit": len(supported_files) - len(selected_files), "truncated": truncated, "priority_files_requested": len(priority_paths), "priority_files_scanned": priority_scanned, "selection_strategy": "recent_changes_first_then_path", "languages": ["python", "javascript/typescript", "go", "c/c++", "github-actions"], "python_multihop_files": multihop_limit, "python_multihop_truncated": len(python_files) > multihop_limit, "javascript_multihop_files": javascript_limit, "javascript_multihop_truncated": len(javascript_files) > javascript_limit, "go_multihop_files": go_limit, "go_multihop_truncated": len(go_files) > go_limit, "go_symbol_resolution": "import_path_alias_and_conservative_shadowing", "c_memory_model": "fixed_stack_buffers_and_bounded_writes"}
+        return sorted({x.id: x for x in output}.values(), key=lambda x: (x.path, x.sink_line)), {"files_inspected": len(selected_files), "eligible_files": len(supported_files), "files_skipped_by_limit": len(supported_files) - len(selected_files), "scan_offset": offset, "next_offset": offset + len(selected_files) if offset + len(selected_files) < len(supported_files) else None, "truncated": truncated, "priority_files_requested": len(priority_paths), "priority_files_scanned": priority_scanned, "selection_strategy": "recent_changes_first_then_path", "languages": ["python", "javascript/typescript", "go", "c/c++", "github-actions"], "python_multihop_files": multihop_limit, "python_multihop_truncated": len(python_files) > multihop_limit, "javascript_multihop_files": javascript_limit, "javascript_multihop_truncated": len(javascript_files) > javascript_limit, "go_multihop_files": go_limit, "go_multihop_truncated": len(go_files) > go_limit, "go_symbol_resolution": "import_path_alias_and_conservative_shadowing", "c_memory_model": "fixed_stack_buffers_and_bounded_writes"}
 
 
 class SemanticAnalysisAgent:
@@ -2473,7 +2473,7 @@ def _public_context(timeline_db: Path | None, repo: str) -> dict:
         return {"status": "unreadable", "known_advisories": []}
 
 
-def audit(root: Path, repo: str, output_root: Path, max_files: int = 20_000, timeline_db: Path | None = None) -> Path:
+def audit(root: Path, repo: str, output_root: Path, max_files: int = 20_000, timeline_db: Path | None = None, complete_scan: bool = False) -> Path:
     canonical = repo_name(repo)
     commit = commit_hash(root)
     destination = output_root / canonical.replace("/", "_") / commit
@@ -2486,7 +2486,7 @@ def audit(root: Path, repo: str, output_root: Path, max_files: int = 20_000, tim
     if clean and audit_file.is_file():
         try:
             cached = json.loads(audit_file.read_text(encoding="utf-8"))
-            if cached.get("schema_version") == 2 and cached.get("commit") == commit and cached.get("scan_cache", {}).get("engine_version") == SCAN_ENGINE_VERSION and cached.get("scan_cache", {}).get("cacheable") is True and Path(cached.get("checkout", "")).resolve() == root.resolve() and int(cached.get("scan_cache", {}).get("max_files", -1)) == max_files:
+            if cached.get("schema_version") == 2 and cached.get("commit") == commit and cached.get("scan_cache", {}).get("engine_version") == SCAN_ENGINE_VERSION and cached.get("scan_cache", {}).get("cacheable") is True and Path(cached.get("checkout", "")).resolve() == root.resolve() and int(cached.get("scan_cache", {}).get("max_files", -1)) == max_files and bool(cached.get("scan_cache", {}).get("complete_scan")) == complete_scan:
                 cached["public_context"] = _public_context(timeline_db, canonical)
                 cached["scan_cache"] = {**cached["scan_cache"], "reused": True, "reused_at": datetime.now(timezone.utc).isoformat()}
                 audit_file.write_text(json.dumps(cached, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -2496,9 +2496,25 @@ def audit(root: Path, repo: str, output_root: Path, max_files: int = 20_000, tim
     profile = RepositoryProfilerAgent().run(root, max(max_files, 50_000))
     priority_paths = set(profile.get("recent_changes", {}).get("files", {}))
     findings, coverage = SourceScanAgent().run(root, canonical, commit, max_files, priority_paths)
+    shard_count = 1
+    if complete_scan:
+        combined = {item.id: item for item in findings}
+        offset = coverage.get("next_offset")
+        while offset is not None:
+            shard_findings, shard_coverage = SourceScanAgent().run(root, canonical, commit, max_files, priority_paths, offset=offset)
+            combined.update({item.id: item for item in shard_findings})
+            coverage["files_inspected"] += shard_coverage["files_inspected"]
+            coverage["priority_files_scanned"] += shard_coverage["priority_files_scanned"]
+            coverage["python_multihop_files"] += shard_coverage["python_multihop_files"]
+            coverage["javascript_multihop_files"] += shard_coverage["javascript_multihop_files"]
+            coverage["go_multihop_files"] += shard_coverage["go_multihop_files"]
+            offset = shard_coverage.get("next_offset")
+            shard_count += 1
+        findings = sorted(combined.values(), key=lambda item: (item.path, item.sink_line))
+        coverage.update({"files_skipped_by_limit": 0, "scan_offset": 0, "next_offset": None, "truncated": False, "complete_scan": True, "shard_count": shard_count, "selection_strategy": "recent_changes_first_then_path_sharded_complete"})
     coverage["repository_profile_complete"] = not profile["truncated"]
     coverage["unsupported_code_files"] = profile["unsupported_code_files"]
-    summary = {"schema_version": 2, "repo": canonical, "commit": commit, "checkout": str(root.resolve()), "profile": profile, "coverage": coverage, "scan_cache": {"reused": False, "cacheable": clean, "engine_version": SCAN_ENGINE_VERSION, "key": f"{canonical}@{commit}", "max_files": max_files, "strategy": coverage["selection_strategy"]}, "public_context": _public_context(timeline_db, canonical), "hypotheses": [asdict(x) for x in findings], "generated_at": datetime.now(timezone.utc).isoformat()}
+    summary = {"schema_version": 2, "repo": canonical, "commit": commit, "checkout": str(root.resolve()), "profile": profile, "coverage": coverage, "scan_cache": {"reused": False, "cacheable": clean, "engine_version": SCAN_ENGINE_VERSION, "key": f"{canonical}@{commit}", "max_files": max_files, "complete_scan": complete_scan, "strategy": coverage["selection_strategy"]}, "public_context": _public_context(timeline_db, canonical), "hypotheses": [asdict(x) for x in findings], "generated_at": datetime.now(timezone.utc).isoformat()}
     audit_file.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
     return audit_file
 

@@ -80,10 +80,12 @@ def main(argv: list[str] | None = None) -> int:
     research.add_argument("target", help="공개 GitHub URL 또는 로컬 체크아웃 경로")
     research.add_argument("--repo", help="로컬 경로의 owner/repo")
     research.add_argument("--max-files", type=int, default=20_000)
+    research.add_argument("--complete-scan", action="store_true", help="파일 상한을 샤드 크기로 사용해 지원 파일 전체를 순회")
     orchestrate = commands.add_parser("research-run", help="코드 조사부터 격리 PoC와 제보 초안까지 제한 자동화")
     orchestrate.add_argument("target", help="공개 GitHub URL 또는 로컬 체크아웃 경로")
     orchestrate.add_argument("--repo", help="로컬 경로의 owner/repo")
     orchestrate.add_argument("--max-files", type=int, default=20_000)
+    orchestrate.add_argument("--complete-scan", action="store_true", help="파일 상한을 샤드 크기로 사용해 지원 파일 전체를 순회")
     orchestrate.add_argument("--max-candidates", type=int, default=3)
     orchestrate.add_argument("--max-pages", type=int, default=100)
     orchestrate.add_argument("--max-manifests", type=int, default=100)
@@ -160,7 +162,7 @@ def main(argv: list[str] | None = None) -> int:
                         finally:
                             store.db.close()
                     root, repo = checkout(args.target, Path("data/checkouts"))
-                output = audit(root, repo, Path("data/research"), args.max_files, args.db)
+                output = audit(root, repo, Path("data/research"), args.max_files, args.db, complete_scan=args.complete_scan)
                 summary = json.loads(output.read_text(encoding="utf-8"))
                 response = {"audit_file": str(output), "repo": repo, "commit": summary["commit"], "hypotheses": len(summary["hypotheses"]), "coverage": summary["coverage"]}
                 if args.command == "research-run":
