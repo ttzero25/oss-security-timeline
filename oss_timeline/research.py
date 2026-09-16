@@ -24,6 +24,7 @@ from .core import Store, repo_name
 
 
 IGNORED_DIRS = {".git", ".venv", "venv", "node_modules", "dist", "build", "vendor", "__pycache__"}
+SCAN_ENGINE_VERSION = 4
 JS_SOURCE = re.compile(r"\b(?:req|request)\.(?:query|body|params|headers)(?:\.[A-Za-z_$][\w$]*|\[[^\]]+\])?", re.I)
 JS_SINKS = [
     ("command_injection", re.compile(r"\b(?:child_process\.)?exec(?:Sync)?\s*\(")),
@@ -47,7 +48,7 @@ PROFILE_MANIFESTS = {"package.json", "pyproject.toml", "setup.py", "setup.cfg", 
 PROFILE_LOCKFILES = {"package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml", "poetry.lock", "Pipfile.lock", "uv.lock", "Cargo.lock", "go.sum", "composer.lock", "gradle.lockfile"}
 LANGUAGE_SUFFIXES = {".py": "python", ".js": "javascript", ".mjs": "javascript", ".cjs": "javascript", ".ts": "typescript", ".mts": "typescript", ".cts": "typescript", ".c": "c", ".h": "c/c++", ".cc": "c/c++", ".cpp": "c/c++", ".cxx": "c/c++", ".hpp": "c/c++", ".go": "go", ".rs": "rust", ".java": "java", ".kt": "kotlin", ".php": "php", ".rb": "ruby"}
 ENTRY_PATTERNS = [
-    ("http", re.compile(r"@\w+(?:\.\w+)*\.(?:route|get|post|put|patch|delete)\s*\(|\b(?:app|router)\.(?:get|post|put|patch|delete|use)\s*\(|@(?:Get|Post|Put|Patch|Delete|Request)Mapping\b")),
+    ("http", re.compile(r"^\s*@\w+(?:\.\w+)*\.(?:route|get|post|put|patch|delete)\s*\(|\b(?:app|router)\.(?:get|post|put|patch|delete|use)\s*\(|^\s*@(?:Get|Post|Put|Patch|Delete|Request)Mapping\b")),
     ("cli", re.compile(r"if\s+__name__\s*==\s*['\"]__main__['\"]|\bfunc\s+main\s*\(|\bint\s+main\s*\(|\bconsole_scripts\b")),
     ("message", re.compile(r"\b(?:subscribe|consumer|on_message|addEventListener)\s*\(")),
 ]
@@ -532,12 +533,42 @@ def _frameworks(dependencies: list[dict], entrypoints: list[dict]) -> list[str]:
     return sorted(detected)
 
 
+def _profile_path_tier(path: str) -> int:
+    parts = {part.lower() for part in path.replace("\\", "/").split("/") if part}
+    if parts & {"test", "tests", "__tests__", "fixture", "fixtures"}:
+        return 3
+    if parts & {"docs", "example", "examples", "sample", "samples", "demo", "demos", "bench", "benchmark", "benchmarks"}:
+        return 2
+    if parts & {"scripts", "tools", "skills", ".agents", ".github"}:
+        return 1
+    return 0
+
+
+def _entrypoint_handler(lines: list[str], index: int, kind: str) -> str | None:
+    line = lines[index]
+    if kind == "cli" and re.search(r"\b(?:func|int)\s+main\s*\(|__main__", line):
+        return "main"
+    route_callback = re.search(r",\s*([A-Za-z_$][\w$]*)\s*\)?\s*[;)]?\s*$", line)
+    if route_callback:
+        return route_callback.group(1)
+    if kind in {"http", "message"} and "=>" in line:
+        return "<inline>"
+    for following in lines[index + 1 : index + 7]:
+        function = re.search(r"\b(?:async\s+)?(?:def|function|func)\s+([A-Za-z_$][\w$]*)\s*\(", following)
+        if function:
+            return function.group(1)
+        method = re.search(r"^\s*(?:public\s+|private\s+|protected\s+|static\s+|async\s+)*([A-Za-z_$][\w$]*)\s*\(", following)
+        if method and method.group(1) not in {"if", "for", "while", "switch", "catch", "with"}:
+            return method.group(1)
+    return None
+
+
 class RepositoryProfilerAgent:
     """Build a bounded repository/package/entry-point coverage ledger."""
     def run(self, root: Path, max_files: int = 50_000) -> dict:
         root = root.resolve()
         languages: dict[str, int] = {}
-        manifests, lockfiles, entrypoints, dependencies = [], [], [], []
+        manifests, lockfiles, entrypoint_candidates, dependencies = [], [], [], []
         files_seen = code_files = unsupported_code_files = oversized = 0
         truncated = False
         for filename in root.rglob("*"):
@@ -578,17 +609,18 @@ class RepositoryProfilerAgent:
             except OSError:
                 continue
             for number, line in enumerate(lines, 1):
-                if len(entrypoints) >= 500:
+                if len(entrypoint_candidates) >= 5_000:
                     break
                 for kind, pattern in ENTRY_PATTERNS:
                     if pattern.search(line):
-                        entrypoints.append({"kind": kind, "path": path, "line": number, "code": line.strip()[:240]})
+                        entrypoint_candidates.append({"kind": kind, "path": path, "line": number, "code": line.strip()[:240], "handler": _entrypoint_handler(lines, number - 1, kind), "path_tier": _profile_path_tier(path)})
                         break
+        entrypoints = sorted(entrypoint_candidates, key=lambda item: (item["path_tier"], {"http": 0, "cli": 1, "message": 2}.get(item["kind"], 3), item["path"], item["line"]))[:500]
         ecosystem_counts: dict[str, int] = {}
         for item in dependencies:
             ecosystem_counts[item["ecosystem"]] = ecosystem_counts.get(item["ecosystem"], 0) + 1
         project_kind = "service" if any(item["kind"] in {"http", "message"} for item in entrypoints) else "cli" if any(item["kind"] == "cli" for item in entrypoints) else "library_or_unknown"
-        return {"files_seen": min(files_seen, max_files), "code_files": code_files, "unsupported_code_files": unsupported_code_files, "oversized_code_files": oversized, "languages": dict(sorted(languages.items(), key=lambda item: (-item[1], item[0]))), "manifests": sorted(manifests), "lockfiles": sorted(lockfiles), "dependencies": dependencies, "dependency_count": len(dependencies), "dependency_ecosystems": ecosystem_counts, "frameworks": _frameworks(dependencies, entrypoints), "project_kind": project_kind, "recent_changes": _recent_change_profile(root), "dependencies_truncated": len(dependencies) >= 5_000, "entrypoints": entrypoints, "entrypoints_truncated": len(entrypoints) >= 500, "truncated": truncated, "scope": "default branch checkout excluding generated/vendor directories"}
+        return {"files_seen": min(files_seen, max_files), "code_files": code_files, "unsupported_code_files": unsupported_code_files, "oversized_code_files": oversized, "languages": dict(sorted(languages.items(), key=lambda item: (-item[1], item[0]))), "manifests": sorted(manifests), "lockfiles": sorted(lockfiles), "dependencies": dependencies, "dependency_count": len(dependencies), "dependency_ecosystems": ecosystem_counts, "frameworks": _frameworks(dependencies, entrypoints), "project_kind": project_kind, "recent_changes": _recent_change_profile(root), "dependencies_truncated": len(dependencies) >= 5_000, "entrypoints": entrypoints, "entrypoints_total_detected": len(entrypoint_candidates), "entrypoints_truncated": len(entrypoint_candidates) > len(entrypoints), "entrypoint_selection_strategy": "production_then_tooling_then_examples_then_tests; http_then_cli_then_message", "truncated": truncated, "scope": "default branch checkout excluding generated/vendor directories"}
 
 
 def _python_hypotheses(filename: Path, root: Path, repo: str, commit: str) -> list[Hypothesis]:
@@ -1688,11 +1720,18 @@ class ReachabilityGateAgent:
         trace = finding.get("trace") or []
         source = trace[0] if trace else {}
         entry_kind = finding.get("entry_kind", "")
-        matching_entry = next((item for item in profile.get("entrypoints", []) if item.get("path") == source.get("path") and abs(int(item.get("line", 0)) - int(source.get("line", 0))) <= 5), None)
-        if entry_kind == "http_route" or matching_entry and matching_entry.get("kind") in {"http", "cli", "message"}:
+        same_path_entries = [item for item in profile.get("entrypoints", []) if item.get("path") == source.get("path")]
+        source_function = str(source.get("function") or finding.get("function") or "")
+        matching_entry = next((item for item in same_path_entries if abs(int(item.get("line", 0)) - int(source.get("line", 0))) <= 8 or item.get("handler") and item.get("handler") == source_function), None)
+        cli_dispatch = next((item for item in same_path_entries if item.get("kind") == "cli" and re.match(r"^(?:main|command_|cmd_|handle_)", source_function)), None)
+        if entry_kind in {"http_route", "pull_request_target"} or matching_entry and matching_entry.get("kind") in {"http", "cli", "message"}:
             return {"status": "pass", "verdict": "DEFAULT_REACHABLE", "entry_kind": entry_kind or matching_entry["kind"], "evidence": source, "reason": "기본 코드 경로의 외부 엔트리포인트에서 위험 동작까지 추적됨"}
+        if cli_dispatch:
+            return {"status": "pass", "verdict": "CLI_HANDLER_REACHABLE", "entry_kind": "cli", "evidence": {"source": source, "entrypoint": cli_dispatch}, "reason": "같은 파일의 기본 CLI 엔트리포인트와 명령 핸들러가 식별됨"}
         if entry_kind == "modeled_request" and source:
             return {"status": "pass", "verdict": "EXTERNAL_INPUT_REACHABLE", "entry_kind": entry_kind, "evidence": source, "reason": "지원되는 request/CLI 입력 모델에서 위험 동작까지 추적됨"}
+        if entry_kind == "modeled_external_input" and source:
+            return {"status": "pass", "verdict": "EXTERNAL_INPUT_REACHABLE", "entry_kind": entry_kind, "evidence": source, "reason": "argv·환경·소켓 등 명시적으로 모델링한 외부 입력에서 위험 동작까지 추적됨"}
         return {"status": "uncertain", "verdict": "REVIEW_REQUIRED", "entry_kind": entry_kind or "unknown", "evidence": source, "reason": "기본 설정에서 호출되는 외부 엔트리포인트를 기계적으로 확인하지 못함"}
 
 
@@ -1781,7 +1820,7 @@ class BuildEnvironmentAgent:
                 return {"status": "unsupported", "reason": "로컬 Go 런타임을 찾지 못했습니다"}
             manifests = [name for name in ("go.mod", "go.sum") if (checkout_root / name).is_file()]
             return {"status": "ready", "runtime": "go", "executable": executable, "image": "golang:1.26-alpine", "manifests": manifests, "default_execution": "limited_process", "dependency_install": "disabled"}
-        return {"status": "unsupported", "reason": "현재 자동 빌드 환경은 제한된 Python·JavaScript 후보만 지원합니다"}
+        return {"status": "unsupported", "reason": "현재 자동 빌드 환경은 제한된 Python·JavaScript/TypeScript·Go 후보만 지원합니다"}
 
 
 class LimitedPocAgent:
@@ -1922,9 +1961,9 @@ if (result !== undefined) console.log(Buffer.isBuffer(result) ? result.toString(
             syntax = _python_parse(source_file.read_text(encoding="utf-8"))
         except (OSError, UnicodeError, SyntaxError) as exc:
             raise ValueError("PoC 대상 Python 파일을 다시 분석할 수 없습니다") from exc
-        top_level = [node for node in syntax.body if isinstance(node, ast.FunctionDef) and node.name == finding["function"]]
+        top_level = [node for node in syntax.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == finding["function"]]
         if len(top_level) != 1:
-            raise ValueError("자동 PoC는 모듈 최상위 동기 함수만 호출합니다")
+            raise ValueError("자동 PoC는 모듈 최상위 함수만 호출합니다")
         proof = destination / "proof.py"
         if proof.exists():
             raise ValueError("기존 PoC 작업물이 있어 자동 생성으로 덮어쓰지 않습니다")
@@ -2344,6 +2383,7 @@ if __name__ == "__main__":
         script = f'''"""Auto-generated bounded reproduction for {finding["id"]}."""
 import importlib.util
 import inspect
+import asyncio
 import os
 import sys
 
@@ -2375,6 +2415,8 @@ def drive(case):
     for parameter in inspect.signature(target).parameters.values():
         arguments.append(InputProxy(value) if parameter.name.lower() in {{"request", "req"}} else value)
     result = target(*arguments)
+    if inspect.isawaitable(result):
+        result = asyncio.run(result)
     output = getattr(result, "stdout", result)
     if output is not None:
         print(output)
@@ -2382,7 +2424,7 @@ def drive(case):
 if __name__ == "__main__":
     drive(sys.argv[1])
 '''
-        manifest = {"finding_id": finding["id"], "repo_path": audit_data["checkout"], "commit": audit_data["commit"], "image": environment["image"], "proof_file": "proof.py", "attack": ["python3", "proof.py", "attack"], "control": ["python3", "proof.py", "control"], "observable": {"type": "stdout_contains", "value": marker}, "timeout_seconds": 30, "generator": "bounded_python_v1"}
+        manifest = {"finding_id": finding["id"], "repo_path": audit_data["checkout"], "commit": audit_data["commit"], "image": environment["image"], "proof_file": "proof.py", "attack": ["python3", "proof.py", "attack"], "control": ["python3", "proof.py", "control"], "observable": {"type": "stdout_contains", "value": marker}, "timeout_seconds": 30, "generator": "bounded_python_v1", "async_policy": "await_if_needed"}
         proof.write_text(script, encoding="utf-8")
         manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
         return manifest_path
@@ -2444,7 +2486,7 @@ def audit(root: Path, repo: str, output_root: Path, max_files: int = 20_000, tim
     if clean and audit_file.is_file():
         try:
             cached = json.loads(audit_file.read_text(encoding="utf-8"))
-            if cached.get("schema_version") == 2 and cached.get("commit") == commit and cached.get("scan_cache", {}).get("cacheable") is True and Path(cached.get("checkout", "")).resolve() == root.resolve() and int(cached.get("scan_cache", {}).get("max_files", -1)) == max_files:
+            if cached.get("schema_version") == 2 and cached.get("commit") == commit and cached.get("scan_cache", {}).get("engine_version") == SCAN_ENGINE_VERSION and cached.get("scan_cache", {}).get("cacheable") is True and Path(cached.get("checkout", "")).resolve() == root.resolve() and int(cached.get("scan_cache", {}).get("max_files", -1)) == max_files:
                 cached["public_context"] = _public_context(timeline_db, canonical)
                 cached["scan_cache"] = {**cached["scan_cache"], "reused": True, "reused_at": datetime.now(timezone.utc).isoformat()}
                 audit_file.write_text(json.dumps(cached, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -2456,7 +2498,7 @@ def audit(root: Path, repo: str, output_root: Path, max_files: int = 20_000, tim
     findings, coverage = SourceScanAgent().run(root, canonical, commit, max_files, priority_paths)
     coverage["repository_profile_complete"] = not profile["truncated"]
     coverage["unsupported_code_files"] = profile["unsupported_code_files"]
-    summary = {"schema_version": 2, "repo": canonical, "commit": commit, "checkout": str(root.resolve()), "profile": profile, "coverage": coverage, "scan_cache": {"reused": False, "cacheable": clean, "key": f"{canonical}@{commit}", "max_files": max_files, "strategy": coverage["selection_strategy"]}, "public_context": _public_context(timeline_db, canonical), "hypotheses": [asdict(x) for x in findings], "generated_at": datetime.now(timezone.utc).isoformat()}
+    summary = {"schema_version": 2, "repo": canonical, "commit": commit, "checkout": str(root.resolve()), "profile": profile, "coverage": coverage, "scan_cache": {"reused": False, "cacheable": clean, "engine_version": SCAN_ENGINE_VERSION, "key": f"{canonical}@{commit}", "max_files": max_files, "strategy": coverage["selection_strategy"]}, "public_context": _public_context(timeline_db, canonical), "hypotheses": [asdict(x) for x in findings], "generated_at": datetime.now(timezone.utc).isoformat()}
     audit_file.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
     return audit_file
 

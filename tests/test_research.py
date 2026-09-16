@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 
 from oss_timeline.core import Collection, Store
-from oss_timeline.research import BuildEnvironmentAgent, DisclosureAgent, DuplicateReviewAgent, LimitedPocAgent, PocValidatorAgent, RepositoryProfilerAgent, ResearchOrchestrator, SemanticAnalysisAgent, SourceScanAgent, audit, claim_template, mark_submission_status, prepare_poc, submission_status
+from oss_timeline.research import BuildEnvironmentAgent, DisclosureAgent, DuplicateReviewAgent, LimitedPocAgent, PocValidatorAgent, ReachabilityGateAgent, RepositoryProfilerAgent, ResearchOrchestrator, SemanticAnalysisAgent, SourceScanAgent, audit, claim_template, mark_submission_status, prepare_poc, submission_status
 
 
 FIXTURE = Path(__file__).parent / "fixtures" / "synthetic_app.py"
@@ -22,6 +22,34 @@ class ResearchTests(unittest.TestCase):
         subprocess.run(["git", "-C", str(repo), "add", "synthetic_app.py"], check=True)
         subprocess.run(["git", "-C", str(repo), "-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "-qm", "fixture"], check=True)
         return repo
+
+    def test_profiler_prioritizes_production_routes_over_test_listeners(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            tests = root / "tests"
+            tests.mkdir()
+            for index in range(510):
+                (tests / f"listener_{index}.js").write_text('window.addEventListener("click", handler);\n', encoding="utf-8")
+            (root / "app.py").write_text('@app.post("/run")\ndef execute(command):\n    return command\n', encoding="utf-8")
+            profile = RepositoryProfilerAgent().run(root)
+            self.assertEqual(profile["entrypoints"][0]["path"], "app.py")
+            self.assertEqual(profile["entrypoints"][0]["handler"], "execute")
+            self.assertGreater(profile["entrypoints_total_detected"], 500)
+            self.assertTrue(profile["entrypoints_truncated"])
+
+    def test_profiler_does_not_treat_kotlin_receiver_get_as_route(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "View.kt").write_text('if (this@Backend.host.get() !== activity.window.decorView) return\n', encoding="utf-8")
+            profile = RepositoryProfilerAgent().run(root)
+            self.assertEqual(profile["entrypoints"], [])
+
+    def test_reachability_links_cli_command_handler_to_same_file_entrypoint(self):
+        finding = {"entry_kind": "modeled_public_api", "function": "command_export", "trace": [{"role": "source", "path": "cli.py", "line": 10, "function": "command_export", "code": "def command_export(args):"}]}
+        profile = {"entrypoints": [{"kind": "cli", "path": "cli.py", "line": 100, "handler": "main", "code": 'if __name__ == "__main__":'}]}
+        result = ReachabilityGateAgent().run(finding, profile)
+        self.assertEqual(result["status"], "pass")
+        self.assertEqual(result["verdict"], "CLI_HANDLER_REACHABLE")
 
     def test_source_scan_keeps_pattern_as_hypothesis(self):
         findings, coverage = SourceScanAgent().run(FIXTURE.parent, "fixture/synthetic", "a" * 40)
@@ -320,6 +348,11 @@ class ResearchTests(unittest.TestCase):
             self.assertFalse(json.loads(first.read_text())["scan_cache"]["reused"])
             second = audit(repo, "fixture/cache", folder / "research", max_files=50)
             self.assertTrue(json.loads(second.read_text())["scan_cache"]["reused"])
+            stale = json.loads(second.read_text())
+            stale["scan_cache"]["engine_version"] = 0
+            second.write_text(json.dumps(stale), encoding="utf-8")
+            refreshed = audit(repo, "fixture/cache", folder / "research", max_files=50)
+            self.assertFalse(json.loads(refreshed.read_text())["scan_cache"]["reused"])
             (repo / "synthetic_app.py").write_text((repo / "synthetic_app.py").read_text() + "\n# dirty\n", encoding="utf-8")
             third = audit(repo, "fixture/cache", folder / "research", max_files=50)
             self.assertFalse(json.loads(third.read_text())["scan_cache"]["reused"])
@@ -430,6 +463,24 @@ print(result.stdout)
             self.assertEqual(evidence["mechanical_result"], "contrast_matched")
             self.assertEqual(evidence["proof_file"], "proof.mjs")
             self.assertFalse(evidence["control_observable"])
+
+    def test_python_limited_poc_awaits_top_level_async_function(self):
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)
+            repo = folder / "repo"
+            repo.mkdir()
+            (repo / "runner.py").write_text('''import subprocess\n\nasync def run(command):\n    return subprocess.run(command, shell=True, capture_output=True, text=True)\n''', encoding="utf-8")
+            subprocess.run(["git", "init", "-q", str(repo)], check=True)
+            subprocess.run(["git", "-C", str(repo), "add", "runner.py"], check=True)
+            subprocess.run(["git", "-C", str(repo), "-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "-qm", "fixture"], check=True)
+            audit_file = audit(repo, "fixture/python-async-poc", folder / "research")
+            audit_data = json.loads(audit_file.read_text())
+            finding = next(item for item in SemanticAnalysisAgent().run(audit_data["hypotheses"], audit_data["profile"]) if item["kind"] == "command_injection")
+            manifest_file = LimitedPocAgent().run(audit_file, finding, BuildEnvironmentAgent().run(repo, finding))
+            manifest = json.loads(manifest_file.read_text())
+            self.assertEqual(manifest["async_policy"], "await_if_needed")
+            evidence = json.loads(PocValidatorAgent().run(manifest_file).read_text())
+            self.assertEqual(evidence["mechanical_result"], "contrast_matched")
 
     def test_python_ssrf_poc_stubs_network_and_runs_real_function(self):
         with tempfile.TemporaryDirectory() as temp:
