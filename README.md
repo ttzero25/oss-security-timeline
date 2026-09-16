@@ -10,9 +10,9 @@ GitHub 오픈소스 저장소의 변경과 공개 취약점 공지를 한 시간
 - CVE/GHSA 별칭을 같은 공지로 묶고, 게시·수정·최초 관측 시각을 저장해 타임라인과 저장소·패키지 순위를 만듭니다.
 - 실험실의 보안 공지 표에는 GHSA/원본 식별자와 등록된 CVE를 별도 칸에 표시하고, 공지 원문에 명시된 CWE 유형만 보여줍니다.
 - 실험실은 공지의 영향 버전과 패치 버전을 비교하고, 공지가 같은 저장소의 커밋을 직접 참조하면 삭제·추가된 코드 줄을 나란히 보여줍니다. 이 참조만으로 해당 커밋이 완전한 fix라고 판정하지 않습니다.
-- 공개 변경 메시지와 Python·JavaScript/TypeScript·C/C++ 코드에서 검토 후보를 찾습니다. Python은 단순 할당과 같은 모듈의 함수 호출 한 단계까지 추적하며, C/C++는 외부 입력이 셸 실행, 비상수 포맷 문자열, 위험 문자열 복사로 이어지는 보수적 패턴만 다룹니다. 후보는 취약점이나 제로데이 확정 결과가 아닙니다.
-- 심층 조사 전에 커밋별 저장소 프로필을 만들어 언어 분포, 패키지·빌드 매니페스트, lockfile, HTTP·CLI·메시지 엔트리포인트와 미지원 코드 파일 수를 기록합니다. 이 범위 원장은 “후보 0건”을 전수 안전 판정으로 오인하지 않게 합니다.
-- Research Orchestrator는 후보 우선순위화, 제한된 Python 코드 실행 후보의 실제 함수 호출 PoC 생성, 격리 대조 실행, 수집된 공개 공지 중복 점검을 연결합니다. 모든 게이트를 통과한 결과만 제보 **초안**으로 만들며 외부 제출과 CVE/GHSA 번호 부여는 자동으로 하지 않습니다.
+- 공개 변경 메시지와 Python·JavaScript/TypeScript·C/C++ 코드에서 검토 후보를 찾습니다. Python은 단순 할당, 같은 모듈 한 단계와 모듈 간 최상위 함수 호출을 최대 네 단계까지 추적하고 입력→호출→위험 동작의 코드 경로를 남깁니다. C/C++는 외부 입력이 셸 실행, 비상수 포맷 문자열, 위험 문자열 복사로 이어지는 보수적 패턴만 다룹니다. 후보는 취약점이나 제로데이 확정 결과가 아닙니다.
+- 심층 조사 전에 커밋별 저장소 프로필을 만들어 언어 분포, 프레임워크, 프로젝트 유형, 패키지·빌드 매니페스트, lockfile, HTTP·CLI·메시지 엔트리포인트, 최근 변경 파일과 미지원 코드 파일 수를 기록합니다. 이 범위 원장은 “후보 0건”을 전수 안전 판정으로 오인하지 않게 합니다.
+- Research Orchestrator는 최근 변경 경로를 후보 우선순위에 반영하고, 기본 설정 도달성 확인, 제한된 Python 코드 실행 후보의 실제 함수 호출 PoC, 격리 대조, 수집된 공개 공지 중복 점검을 연결합니다. 마지막으로 외부 도달성·기본 설정·공격자 통제·보안 영향·기존 공지 중복의 다섯 근거를 기록합니다. 게이트를 통과한 결과만 제보 **초안**으로 만들며 외부 제출과 CVE/GHSA 번호 부여는 자동으로 하지 않습니다.
 - 로컬 웹의 Home에서 누적 탐지와 에이전트 역할을, 실험실에서 저장소별 조사 상태를, 정리에서 OSS별 요약을 확인할 수 있습니다. 관계망은 데이터 연결을, 리포트는 CLI에서 생성된 검증 결과와 비공개 초안을 읽기 전용으로 보여줍니다.
 
 Python 3.11 이상이 필요합니다. 기본 CLI와 웹 화면에는 추가 Python 패키지나 Docker가 필요하지 않습니다. 웹은 `GITHUB_TOKEN`이 없으면 설치·로그인된 GitHub CLI의 인증을 메모리에서만 활용합니다. 어느 쪽도 없으면 비인증 API 한도가 적용되므로 읽기용 토큰을 권장합니다. 더 강한 PoC 격리가 필요할 때만 Docker와 `--container`를 사용합니다.
@@ -73,7 +73,7 @@ python3 -m oss_timeline disclosure path/to/audit.json FIND-XXXXXXXXXXXX \
 
 | 위치 | 내용 |
 | --- | --- |
-| [agents](agents/README.md) | 9개 역할별 입력·출력과 실행 흐름 |
+| [agents](agents/README.md) | 11개 역할별 입력·출력과 실행 흐름 |
 | [tools](tools/README.md) | CLI 안내와 로컬 수집·조회 웹 도구 |
 | [rules](rules/README.md) | 코드 탐지, PoC 검증, 비공개 제보 기준 |
 | [troubleshooting](troubleshooting/README.md) | API 제한·PoC 실행·수집 누락 등의 해결 방법 |
@@ -81,7 +81,7 @@ python3 -m oss_timeline disclosure path/to/audit.json FIND-XXXXXXXXXXXX \
 | `tests/` | 수집·중복 제거·PoC·제보 게이트 회귀 검사 |
 | `data/` | 실행 중 생성되는 DB, 복제본, PoC, 비공개 초안; Git 제외 |
 
-공개 데이터 흐름은 `InventoryAgent → (ChangeAgent + AdvisoryAgent 병렬) → CandidateAgent`입니다. 코드 조사 흐름은 `RepositoryProfilerAgent → SourceScanAgent → ResearchOrchestrator → PocValidatorAgent → DisclosureAgent`이며 결과 상태가 다시 타임라인에 들어갑니다. 이 역할들은 재현 가능한 Python 모듈이며, 지원 범위를 벗어난 후보는 사람의 분석 대상으로 남깁니다.
+공개 데이터 흐름은 `InventoryAgent → (ChangeAgent + AdvisoryAgent 병렬) → CandidateAgent`입니다. 코드 조사 흐름은 `RepositoryProfilerAgent → SourceScanAgent → ReachabilityGateAgent → ResearchOrchestrator → PocValidatorAgent → EvidenceGateAgent → DisclosureAgent`이며 결과 상태가 다시 타임라인에 들어갑니다. 이 역할들은 재현 가능한 Python 모듈이며, 지원 범위를 벗어난 후보는 사람의 분석 대상으로 남깁니다.
 
 ## 결과를 해석할 때
 

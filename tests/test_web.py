@@ -29,6 +29,20 @@ class DashboardTests(unittest.TestCase):
             self.assertIn(">2.0<", rendered)
             store.db.close()
 
+    def test_lab_shows_multihop_trace_and_evidence_gate(self):
+        with tempfile.TemporaryDirectory() as temp:
+            store = Store(Path(temp) / "db.sqlite3")
+            store.save(Collection("example/demo"))
+            finding_id = "FIND-123456789ABC"
+            audits = [{"repo": "example/demo", "commit": "a" * 40, "generated_at": "2026-09-16T00:00:00Z", "hypotheses": [{"id": finding_id, "kind": "command_injection", "path": "app.py", "source_path": "app.py", "sink_path": "helpers.py", "sink_line": 5, "trace": [{"role": "source", "path": "app.py", "line": 9}, {"role": "call", "path": "service.py", "line": 4}, {"role": "sink", "path": "helpers.py", "line": 5}]}], "poc_contrasts": 1, "draft_pairs": 1, "coverage": {"files_inspected": 3, "languages": ["python"]}, "profile": {"files_seen": 3, "code_files": 3, "languages": {"python": 3}, "frameworks": ["FastAPI"], "project_kind": "service", "recent_changes": {"commits_considered": 4, "files": {"app.py": 2}}}, "orchestration": {"results": [{"finding_id": finding_id, "status": "draft_ready", "stages": {"evidence_gate": {"verdict": "CONFIRMED"}}}]}}]
+            rendered = lab("example/demo", store.report("example/demo"), audits, None, None, {"comparisons": [], "truncated": False})
+            self.assertIn("입력→호출→위험 동작", rendered)
+            self.assertIn("source:app.py:9 → call:service.py:4 → sink:helpers.py:5", rendered)
+            self.assertIn("CONFIRMED", rendered)
+            self.assertIn("FastAPI", rendered)
+            self.assertIn("최근 변경 분석 커밋 4개", rendered)
+            store.db.close()
+
     def test_restart_marks_running_job_interrupted(self):
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / "jobs.json"

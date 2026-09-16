@@ -12,7 +12,7 @@ import subprocess
 import sys
 import tempfile
 import tomllib
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -41,6 +41,13 @@ ENTRY_PATTERNS = [
     ("cli", re.compile(r"if\s+__name__\s*==\s*['\"]__main__['\"]|\bfunc\s+main\s*\(|\bint\s+main\s*\(|\bconsole_scripts\b")),
     ("message", re.compile(r"\b(?:subscribe|consumer|on_message|addEventListener)\s*\(")),
 ]
+FRAMEWORK_DEPENDENCIES = {
+    "flask": "Flask", "django": "Django", "fastapi": "FastAPI", "starlette": "Starlette",
+    "express": "Express", "koa": "Koa", "@nestjs/core": "NestJS", "next": "Next.js",
+    "spring-boot": "Spring Boot", "org.springframework.boot": "Spring Boot",
+    "github.com/gin-gonic/gin": "Gin", "github.com/labstack/echo": "Echo",
+    "github.com/gofiber/fiber": "Fiber", "actix-web": "Actix Web", "rocket": "Rocket",
+}
 
 
 def _dependency_records(filename: str, text: str, path: str) -> list[dict]:
@@ -103,6 +110,10 @@ class Hypothesis:
     sink_code: str
     function: str
     status: str = "hypothesis"
+    source_path: str = ""
+    sink_path: str = ""
+    entry_kind: str = "modeled_external_input"
+    trace: list[dict] = field(default_factory=list)
 
 
 def _qualified(node: ast.AST) -> str:
@@ -143,10 +154,53 @@ def _sink_kind(node: ast.Call) -> tuple[str, ast.AST] | None:
     return None
 
 
-def _hypothesis(repo: str, commit: str, kind: str, path: str, source_line: int, sink_line: int, source_code: str, sink_code: str, function: str) -> Hypothesis:
-    identity = f"{repo}|{commit}|{kind}|{path}|{source_line}|{sink_line}"
-    stable = f"{repo}|{kind}|{path}|{function}|{source_code.strip()}|{sink_code.strip()}"
-    return Hypothesis("FIND-" + hashlib.sha256(identity.encode()).hexdigest()[:12].upper(), "TRACK-" + hashlib.sha256(stable.encode()).hexdigest()[:12].upper(), repo, commit, kind, path, source_line, sink_line, source_code.strip()[:400], sink_code.strip()[:400], function)
+def _hypothesis(repo: str, commit: str, kind: str, path: str, source_line: int, sink_line: int, source_code: str, sink_code: str, function: str, *, source_path: str | None = None, sink_path: str | None = None, entry_kind: str = "modeled_external_input", trace: list[dict] | None = None) -> Hypothesis:
+    source_path = source_path or path
+    sink_path = sink_path or path
+    identity = f"{repo}|{commit}|{kind}|{source_path}|{source_line}|{sink_path}|{sink_line}"
+    stable = f"{repo}|{kind}|{source_path}|{sink_path}|{function}|{source_code.strip()}|{sink_code.strip()}"
+    path_trace = trace or [
+        {"role": "source", "path": source_path, "line": source_line, "code": source_code.strip()[:240]},
+        {"role": "sink", "path": sink_path, "line": sink_line, "code": sink_code.strip()[:240]},
+    ]
+    return Hypothesis("FIND-" + hashlib.sha256(identity.encode()).hexdigest()[:12].upper(), "TRACK-" + hashlib.sha256(stable.encode()).hexdigest()[:12].upper(), repo, commit, kind, path, source_line, sink_line, source_code.strip()[:400], sink_code.strip()[:400], function, "hypothesis", source_path, sink_path, entry_kind, path_trace)
+
+
+def _recent_change_profile(root: Path, max_commits: int = 20) -> dict:
+    """Return a bounded per-file change count without requiring a full clone."""
+    try:
+        count_result = subprocess.run(["git", "-C", str(root), "rev-list", "--count", "HEAD"], capture_output=True, text=True, timeout=10)
+        commit_count = int(count_result.stdout.strip()) if count_result.returncode == 0 else 0
+        if commit_count < 2:
+            return {"commits_considered": 0, "files": {}}
+        depth = min(max_commits, commit_count - 1)
+        result = subprocess.run(["git", "-C", str(root), "log", "--format=", "--name-only", f"HEAD~{depth}..HEAD"], capture_output=True, text=True, timeout=20)
+        if result.returncode:
+            return {"commits_considered": 0, "files": {}}
+        files: dict[str, int] = {}
+        for value in result.stdout.splitlines():
+            path = value.strip()
+            if path and not path.startswith("/") and ".." not in Path(path).parts:
+                files[path] = files.get(path, 0) + 1
+        return {"commits_considered": depth, "files": dict(sorted(files.items(), key=lambda item: (-item[1], item[0]))[:1000])}
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return {"commits_considered": 0, "files": {}}
+
+
+def _frameworks(dependencies: list[dict], entrypoints: list[dict]) -> list[str]:
+    detected = set()
+    for item in dependencies:
+        name = str(item.get("name") or "").lower()
+        for marker, label in FRAMEWORK_DEPENDENCIES.items():
+            if name == marker or name.startswith(marker + "/"):
+                detected.add(label)
+    for entry in entrypoints:
+        code = str(entry.get("code") or "").lower()
+        if "@app." in code or "@blueprint." in code:
+            detected.add("Python web framework")
+        if "router." in code or "app.get(" in code or "app.post(" in code:
+            detected.add("JavaScript web framework")
+    return sorted(detected)
 
 
 class RepositoryProfilerAgent:
@@ -204,7 +258,8 @@ class RepositoryProfilerAgent:
         ecosystem_counts: dict[str, int] = {}
         for item in dependencies:
             ecosystem_counts[item["ecosystem"]] = ecosystem_counts.get(item["ecosystem"], 0) + 1
-        return {"files_seen": min(files_seen, max_files), "code_files": code_files, "unsupported_code_files": unsupported_code_files, "oversized_code_files": oversized, "languages": dict(sorted(languages.items(), key=lambda item: (-item[1], item[0]))), "manifests": sorted(manifests), "lockfiles": sorted(lockfiles), "dependencies": dependencies, "dependency_count": len(dependencies), "dependency_ecosystems": ecosystem_counts, "dependencies_truncated": len(dependencies) >= 5_000, "entrypoints": entrypoints, "entrypoints_truncated": len(entrypoints) >= 500, "truncated": truncated, "scope": "default branch checkout excluding generated/vendor directories"}
+        project_kind = "service" if any(item["kind"] in {"http", "message"} for item in entrypoints) else "cli" if any(item["kind"] == "cli" for item in entrypoints) else "library_or_unknown"
+        return {"files_seen": min(files_seen, max_files), "code_files": code_files, "unsupported_code_files": unsupported_code_files, "oversized_code_files": oversized, "languages": dict(sorted(languages.items(), key=lambda item: (-item[1], item[0]))), "manifests": sorted(manifests), "lockfiles": sorted(lockfiles), "dependencies": dependencies, "dependency_count": len(dependencies), "dependency_ecosystems": ecosystem_counts, "frameworks": _frameworks(dependencies, entrypoints), "project_kind": project_kind, "recent_changes": _recent_change_profile(root), "dependencies_truncated": len(dependencies) >= 5_000, "entrypoints": entrypoints, "entrypoints_truncated": len(entrypoints) >= 500, "truncated": truncated, "scope": "default branch checkout excluding generated/vendor directories"}
 
 
 def _python_hypotheses(filename: Path, root: Path, repo: str, commit: str) -> list[Hypothesis]:
@@ -249,7 +304,8 @@ def _python_hypotheses(filename: Path, root: Path, repo: str, commit: str) -> li
                 else:
                     source = next((assigned[name] for name in _name_refs(argument) if name in assigned), None)
                 if source:
-                    output.append(_hypothesis(repo, commit, kind, path, source[0], node.lineno, source[1], lines[node.lineno - 1], function.name))
+                    entry_kind = "http_route" if http_route and source[0] == function.lineno else "modeled_request"
+                    output.append(_hypothesis(repo, commit, kind, path, source[0], node.lineno, source[1], lines[node.lineno - 1], function.name, entry_kind=entry_kind))
     return output
 
 
@@ -315,7 +371,161 @@ def _python_interprocedural_hypotheses(filename: Path, root: Path, repo: str, co
                     continue
                 source = (argument.lineno, lines[argument.lineno - 1]) if _request_source(argument) else next((external[name] for name in _name_refs(argument) if name in external), None)
                 if source:
-                    output.append(_hypothesis(repo, commit, summary["kind"], path, source[0], summary["sink_line"], source[1], summary["sink_code"], caller.name))
+                    output.append(_hypothesis(repo, commit, summary["kind"], path, source[0], summary["sink_line"], source[1], summary["sink_code"], caller.name, entry_kind="http_route" if http_route else "modeled_request"))
+    return output
+
+
+def _python_module_name(path: Path) -> str:
+    parts = list(path.with_suffix("").parts)
+    if parts and parts[-1] == "__init__":
+        parts.pop()
+    return ".".join(parts)
+
+
+def _python_multihop_hypotheses(files: list[Path], root: Path, repo: str, commit: str, max_depth: int = 4) -> list[Hypothesis]:
+    """Trace route/request input through top-level Python functions across modules."""
+    modules: dict[str, dict] = {}
+    functions: dict[str, dict] = {}
+    for filename in files:
+        try:
+            text = filename.read_text(encoding="utf-8")
+            tree = ast.parse(text)
+            relative = filename.relative_to(root)
+        except (OSError, UnicodeError, SyntaxError, ValueError):
+            continue
+        module = _python_module_name(relative)
+        lines = text.splitlines()
+        imports: dict[str, str] = {}
+        for node in tree.body:
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    imports[alias.asname or alias.name.split(".", 1)[0]] = alias.name
+            elif isinstance(node, ast.ImportFrom):
+                current_package = module.split(".") if filename.name == "__init__.py" else module.split(".")[:-1]
+                if node.level:
+                    keep = max(0, len(current_package) - node.level + 1)
+                    base_parts = current_package[:keep]
+                else:
+                    base_parts = []
+                if node.module:
+                    base_parts.extend(node.module.split("."))
+                base = ".".join(base_parts)
+                for alias in node.names:
+                    imports[alias.asname or alias.name] = ".".join(part for part in (base, alias.name) if part)
+        modules[module] = {"path": relative.as_posix(), "lines": lines, "imports": imports}
+        for node in tree.body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                functions[f"{module}:{node.name}"] = {"node": node, "module": module, "path": relative.as_posix(), "lines": lines, "imports": imports}
+
+    def resolve_callee(info: dict, call: ast.Call) -> str | None:
+        qualified = _qualified(call.func)
+        if not qualified:
+            return None
+        module = info["module"]
+        if "." not in qualified:
+            local = f"{module}:{qualified}"
+            if local in functions:
+                return local
+            imported = info["imports"].get(qualified)
+            if imported and "." in imported:
+                candidate = imported.rsplit(".", 1)
+                return f"{candidate[0]}:{candidate[1]}"
+            return None
+        head, tail = qualified.split(".", 1)
+        imported_module = info["imports"].get(head)
+        if imported_module and "." not in tail:
+            return f"{imported_module}:{tail}"
+        return None
+
+    def parameter_origins(info: dict) -> tuple[list[str], dict[str, str]]:
+        node = info["node"]
+        parameters = [argument.arg for argument in node.args.posonlyargs + node.args.args + node.args.kwonlyargs]
+        origins = {name: name for name in parameters}
+        for child in ast.walk(node):
+            if isinstance(child, (ast.Assign, ast.AnnAssign)) and child.value is not None:
+                origin = next((origins[name] for name in _name_refs(child.value) if name in origins), None)
+                if origin:
+                    targets = child.targets if isinstance(child, ast.Assign) else [child.target]
+                    for target in targets:
+                        for sub in ast.walk(target):
+                            if isinstance(sub, ast.Name):
+                                origins[sub.id] = origin
+        return parameters, origins
+
+    summaries: dict[str, list[dict]] = {key: [] for key in functions}
+    origins_by_function = {key: parameter_origins(info) for key, info in functions.items()}
+    for key, info in functions.items():
+        _, origins = origins_by_function[key]
+        for node in ast.walk(info["node"]):
+            if not isinstance(node, ast.Call) or not (sink := _sink_kind(node)):
+                continue
+            kind, argument = sink
+            parameter = next((origins[name] for name in _name_refs(argument) if name in origins), None)
+            if parameter:
+                summaries[key].append({"parameter": parameter, "kind": kind, "sink_path": info["path"], "sink_line": node.lineno, "sink_code": info["lines"][node.lineno - 1], "trace": [{"role": "sink", "path": info["path"], "line": node.lineno, "function": info["node"].name, "code": info["lines"][node.lineno - 1].strip()[:240]}]})
+
+    for _ in range(max_depth):
+        changed = False
+        for key, info in functions.items():
+            parameters, origins = origins_by_function[key]
+            for call in (node for node in ast.walk(info["node"]) if isinstance(node, ast.Call)):
+                callee = resolve_callee(info, call)
+                if not callee or callee not in summaries or callee == key:
+                    continue
+                callee_parameters = origins_by_function[callee][0]
+                supplied = {callee_parameters[index]: value for index, value in enumerate(call.args) if index < len(callee_parameters)}
+                supplied.update({keyword.arg: keyword.value for keyword in call.keywords if keyword.arg})
+                for downstream in list(summaries[callee]):
+                    argument = supplied.get(downstream["parameter"])
+                    if argument is None:
+                        continue
+                    parameter = next((origins[name] for name in _name_refs(argument) if name in origins), None)
+                    if not parameter:
+                        continue
+                    trace = [{"role": "call", "path": info["path"], "line": call.lineno, "function": info["node"].name, "callee": callee, "code": info["lines"][call.lineno - 1].strip()[:240]}, *downstream["trace"]]
+                    candidate = {**downstream, "parameter": parameter, "trace": trace}
+                    signature = (candidate["parameter"], candidate["kind"], candidate["sink_path"], candidate["sink_line"], tuple((step["path"], step["line"]) for step in trace))
+                    existing = {(item["parameter"], item["kind"], item["sink_path"], item["sink_line"], tuple((step["path"], step["line"]) for step in item["trace"])) for item in summaries[key]}
+                    if signature not in existing and len(summaries[key]) < 100:
+                        summaries[key].append(candidate)
+                        changed = True
+        if not changed:
+            break
+
+    output = []
+    for key, info in functions.items():
+        node = info["node"]
+        parameters, origins = origins_by_function[key]
+        route = any(isinstance(decorator, ast.Call) and _qualified(decorator.func).rsplit(".", 1)[-1] in {"route", "get", "post", "put", "patch", "delete"} for decorator in node.decorator_list)
+        external: dict[str, tuple[int, str, str]] = {}
+        if route:
+            for parameter in parameters:
+                if parameter not in {"self", "cls", "request"}:
+                    external[parameter] = (node.lineno, info["lines"][node.lineno - 1], "http_route")
+        for call in (child for child in ast.walk(node) if isinstance(child, ast.Call)):
+            callee = resolve_callee(info, call)
+            if not callee or callee not in summaries:
+                continue
+            callee_parameters = origins_by_function[callee][0]
+            supplied = {callee_parameters[index]: value for index, value in enumerate(call.args) if index < len(callee_parameters)}
+            supplied.update({keyword.arg: keyword.value for keyword in call.keywords if keyword.arg})
+            for downstream in summaries[callee]:
+                argument = supplied.get(downstream["parameter"])
+                if argument is None:
+                    continue
+                if _request_source(argument):
+                    source = (argument.lineno, info["lines"][argument.lineno - 1], "modeled_request")
+                else:
+                    source = next((external[name] for name in _name_refs(argument) if name in external), None)
+                    if not source:
+                        parameter = next((origins[name] for name in _name_refs(argument) if name in origins), None)
+                        source = external.get(parameter) if parameter else None
+                if not source:
+                    continue
+                trace = [{"role": "source", "path": info["path"], "line": source[0], "function": node.name, "code": source[1].strip()[:240]}, {"role": "call", "path": info["path"], "line": call.lineno, "function": node.name, "callee": callee, "code": info["lines"][call.lineno - 1].strip()[:240]}, *downstream["trace"]]
+                output.append(_hypothesis(repo, commit, downstream["kind"], info["path"], source[0], downstream["sink_line"], source[1], downstream["sink_code"], node.name, source_path=info["path"], sink_path=downstream["sink_path"], entry_kind=source[2], trace=trace))
+                if len(output) >= 10_000:
+                    return output
     return output
 
 
@@ -394,6 +604,7 @@ class SourceScanAgent:
         if not root.is_dir():
             raise ValueError("조사 대상 디렉터리가 없습니다")
         output: list[Hypothesis] = []
+        python_files: list[Path] = []
         inspected = 0
         truncated = False
         for filename in root.rglob("*"):
@@ -409,29 +620,82 @@ class SourceScanAgent:
                 truncated = True
                 break
             if filename.suffix == ".py":
+                python_files.append(filename)
                 output.extend(_python_hypotheses(filename, root, repo, commit))
                 output.extend(_python_interprocedural_hypotheses(filename, root, repo, commit))
             elif filename.suffix in C_EXTENSIONS:
                 output.extend(_c_hypotheses(filename, root, repo, commit))
             else:
                 output.extend(_javascript_hypotheses(filename, root, repo, commit))
-        return sorted({x.id: x for x in output}.values(), key=lambda x: (x.path, x.sink_line)), {"files_inspected": min(inspected, max_files), "truncated": truncated, "languages": ["python", "javascript/typescript", "c/c++"]}
+        multihop_limit = min(len(python_files), 5_000)
+        output.extend(_python_multihop_hypotheses(python_files[:multihop_limit], root, repo, commit))
+        return sorted({x.id: x for x in output}.values(), key=lambda x: (x.path, x.sink_line)), {"files_inspected": min(inspected, max_files), "truncated": truncated, "languages": ["python", "javascript/typescript", "c/c++"], "python_multihop_files": multihop_limit, "python_multihop_truncated": len(python_files) > multihop_limit}
 
 
 class SemanticAnalysisAgent:
     """Prioritize hypotheses and allow automatic reproduction only for bounded safe templates."""
     SCORES = {"command_injection": 90, "code_execution": 85, "unsafe_deserialization": 70, "possible_ssrf": 60, "format_string": 55, "unsafe_copy": 50}
 
-    def run(self, hypotheses: list[dict]) -> list[dict]:
+    def run(self, hypotheses: list[dict], profile: dict | None = None) -> list[dict]:
+        changed = (profile or {}).get("recent_changes", {}).get("files", {})
         output = []
         for finding in hypotheses:
             suffix = Path(finding.get("path", "")).suffix
             supported = suffix == ".py" and finding.get("kind") in {"command_injection", "code_execution"}
             score = self.SCORES.get(finding.get("kind"), 40)
+            reasons = [f"{finding.get('kind')} 기본 위험도 {score}"]
             if finding.get("function") and finding["function"] != "javascript_scope_unknown":
                 score += 5
-            output.append({**finding, "priority": min(score, 100), "auto_reproduction_supported": supported, "automation_reason": "제한된 Python 실제 함수 호출 템플릿 지원" if supported else "이 언어·취약점 유형의 안전한 자동 PoC 템플릿이 없음"})
+                reasons.append("함수 경계 식별 +5")
+            touched = max(changed.get(finding.get("source_path") or finding.get("path"), 0), changed.get(finding.get("sink_path") or finding.get("path"), 0))
+            if touched:
+                boost = min(10, 4 + touched)
+                score += boost
+                reasons.append(f"최근 커밋 변경 경로 +{boost}")
+            if len(finding.get("trace", [])) >= 3:
+                score += 3
+                reasons.append("호출 경로 근거 +3")
+            output.append({**finding, "priority": min(score, 100), "priority_reasons": reasons, "auto_reproduction_supported": supported, "automation_reason": "제한된 Python 실제 함수 호출 템플릿 지원" if supported else "이 언어·취약점 유형의 안전한 자동 PoC 템플릿이 없음"})
         return sorted(output, key=lambda item: (-item["priority"], item.get("path", ""), item.get("sink_line", 0)))
+
+
+class ReachabilityGateAgent:
+    """Require a cited external entry and reject clearly disconnected hypotheses."""
+    def run(self, finding: dict, profile: dict) -> dict:
+        trace = finding.get("trace") or []
+        source = trace[0] if trace else {}
+        entry_kind = finding.get("entry_kind", "")
+        matching_entry = next((item for item in profile.get("entrypoints", []) if item.get("path") == source.get("path") and abs(int(item.get("line", 0)) - int(source.get("line", 0))) <= 5), None)
+        if entry_kind == "http_route" or matching_entry and matching_entry.get("kind") in {"http", "cli", "message"}:
+            return {"status": "pass", "verdict": "DEFAULT_REACHABLE", "entry_kind": entry_kind or matching_entry["kind"], "evidence": source, "reason": "기본 코드 경로의 외부 엔트리포인트에서 위험 동작까지 추적됨"}
+        if entry_kind == "modeled_request" and source:
+            return {"status": "pass", "verdict": "EXTERNAL_INPUT_REACHABLE", "entry_kind": entry_kind, "evidence": source, "reason": "지원되는 request/CLI 입력 모델에서 위험 동작까지 추적됨"}
+        return {"status": "uncertain", "verdict": "REVIEW_REQUIRED", "entry_kind": entry_kind or "unknown", "evidence": source, "reason": "기본 설정에서 호출되는 외부 엔트리포인트를 기계적으로 확인하지 못함"}
+
+
+class EvidenceGateAgent:
+    """Apply explicit evidence gates before a private draft can be generated."""
+    HIGH_IMPACT = {"command_injection", "code_execution", "unsafe_deserialization", "unsafe_copy", "format_string"}
+
+    def run(self, audit_data: dict, finding: dict, reachability: dict, evidence: dict, duplicate_review: dict) -> dict:
+        trace = finding.get("trace") or []
+        external = reachability.get("status") == "pass"
+        criteria = {
+            "C1_external_reachability": "PASS" if external and len(trace) >= 2 else "UNCERTAIN",
+            "C2_default_configuration": "PASS" if reachability.get("verdict") == "DEFAULT_REACHABLE" else "PARTIAL" if external else "UNCERTAIN",
+            "C3_attacker_control": "PASS" if evidence.get("mechanical_result") == "contrast_matched" and external else "UNCERTAIN",
+            "C4_security_impact": "PASS" if finding.get("kind") in self.HIGH_IMPACT else "PARTIAL",
+            "C5_no_known_duplicate": "PASS" if duplicate_review.get("status") == "no_match_in_collected_snapshot" and audit_data.get("public_context", {}).get("status") == "snapshot" else "FAIL" if duplicate_review.get("status") == "possible_duplicate" else "UNCERTAIN",
+        }
+        if "FAIL" in criteria.values():
+            verdict = "REBUTTED"
+        elif "UNCERTAIN" in criteria.values():
+            verdict = "NEEDS_MORE_EVIDENCE"
+        elif "PARTIAL" in criteria.values():
+            verdict = "CONFIRMED_LOW"
+        else:
+            verdict = "CONFIRMED"
+        return {"status": "complete", "verdict": verdict, "criteria": criteria, "manual_review_required": True}
 
 
 class BuildEnvironmentAgent:
@@ -482,6 +746,7 @@ import os
 import sys
 
 REPO = os.environ["OSS_POC_REPO"]
+sys.path.insert(0, REPO)
 MARKER = {marker!r}
 SINK = {finding.get("sink_code", "")!r}
 
@@ -525,7 +790,7 @@ def checkout(target: str, checkouts: Path) -> tuple[Path, str]:
     repo = repo_name(target)
     checkouts.mkdir(parents=True, exist_ok=True)
     folder = checkouts / (repo.replace("/", "_") + "-" + secrets.token_hex(5))
-    command = ["git", "clone", "--depth", "1", "--single-branch", "https://github.com/" + repo + ".git", str(folder)]
+    command = ["git", "clone", "--depth", "50", "--single-branch", "https://github.com/" + repo + ".git", str(folder)]
     result = subprocess.run(command, capture_output=True, text=True, timeout=180)
     if result.returncode:
         raise RuntimeError("공개 저장소 복제 실패: " + result.stderr[-500:])
@@ -610,7 +875,7 @@ if __name__ == "__main__":
 
 
 def claim_template(finding: dict) -> dict:
-    return {"finding_id": finding["id"], "title": "", "summary": "", "vulnerability_class": finding["kind"], "cwe": "", "cvss_vector": "", "affected": {"ecosystem": "", "package": "", "versions": "", "patched_version": "Not yet available"}, "source": {"file": finding["path"], "line": finding["source_line"], "attacker_control": "", "evidence": finding["source_code"]}, "sink": {"file": finding["path"], "line": finding["sink_line"], "effect": "", "evidence": finding["sink_code"]}, "default_configuration_evidence": "", "upstream_guard_analysis": "", "impact": "", "root_cause": "", "reproduction_steps": [], "negative_control_explanation": "", "known_advisory_checks": {"github": "", "osv": "", "vendor_or_web": "", "duplicate_analysis": ""}, "remediation": ""}
+    return {"finding_id": finding["id"], "title": "", "summary": "", "vulnerability_class": finding["kind"], "cwe": "", "cvss_vector": "", "affected": {"ecosystem": "", "package": "", "versions": "", "patched_version": "Not yet available"}, "source": {"file": finding.get("source_path") or finding["path"], "line": finding["source_line"], "attacker_control": "", "evidence": finding["source_code"]}, "sink": {"file": finding.get("sink_path") or finding["path"], "line": finding["sink_line"], "effect": "", "evidence": finding["sink_code"]}, "trace": finding.get("trace", []), "default_configuration_evidence": "", "upstream_guard_analysis": "", "impact": "", "root_cause": "", "reproduction_steps": [], "negative_control_explanation": "", "known_advisory_checks": {"github": "", "osv": "", "vendor_or_web": "", "duplicate_analysis": ""}, "remediation": ""}
 
 
 class PocValidatorAgent:
@@ -718,9 +983,9 @@ class DisclosureAgent:
         poc_dir = claim_file.parent
         if evidence.get("proof_sha256") != hashlib.sha256((poc_dir / "proof.py").read_bytes()).hexdigest() or evidence.get("manifest_sha256") != hashlib.sha256((poc_dir / "manifest.json").read_bytes()).hexdigest():
             raise ValueError("PoC 검증 이후 작업물 파일이 변경됐습니다")
-        for field, expected_line in (("source", finding["source_line"]), ("sink", finding["sink_line"])):
+        for field, expected_line, expected_path in (("source", finding["source_line"], finding.get("source_path") or finding["path"]), ("sink", finding["sink_line"], finding.get("sink_path") or finding["path"])):
             citation = claim[field]
-            if citation["file"] != finding["path"] or int(citation["line"]) != expected_line:
+            if citation["file"] != expected_path or int(citation["line"]) != expected_line:
                 raise ValueError(f"{field} 인용 위치가 조사 가설과 다릅니다")
             source_file = (checkout_path / citation["file"]).resolve()
             if not source_file.is_relative_to(checkout_path.resolve()):
@@ -731,6 +996,8 @@ class DisclosureAgent:
         checks = claim["known_advisory_checks"]
         affected = claim["affected"]
         steps = "\n".join(f"{i}. {step}" for i, step in enumerate(claim["reproduction_steps"], 1))
+        gate = claim.get("evidence_gate", {})
+        gate_rows = "\n".join(f"| {name} | {value} |" for name, value in gate.get("criteria", {}).items()) or "| Manual review | Required |"
         description = f'''# {claim["title"]}
 
 | GHSA form field | Value |
@@ -758,6 +1025,14 @@ Dangerous sink: `{claim["sink"]["file"]}:{claim["sink"]["line"]}` — {claim["si
 Default configuration: {claim["default_configuration_evidence"]}
 
 Upstream guards and rebuttal checks: {claim["upstream_guard_analysis"]}
+
+## Evidence gate
+
+Overall verdict: **{gate.get("verdict", "manual review required")}**
+
+| Criterion | Result |
+| --- | --- |
+{gate_rows}
 
 ## Proof of concept
 
@@ -837,7 +1112,7 @@ class DuplicateReviewAgent:
         }
 
 
-def _automatic_claim(finding: dict, duplicate_review: dict) -> dict:
+def _automatic_claim(finding: dict, duplicate_review: dict, reachability: dict, evidence_gate: dict) -> dict:
     cwe = {"command_injection": "CWE-78", "code_execution": "CWE-94"}.get(finding["kind"], "CWE pending review")
     label = {"command_injection": "Command injection", "code_execution": "Code execution"}.get(finding["kind"], finding["kind"])
     claim = claim_template(finding)
@@ -849,8 +1124,8 @@ def _automatic_claim(finding: dict, duplicate_review: dict) -> dict:
         "cwe": cwe,
         "impact": "The isolated marker-based reproduction demonstrates control of the modeled dangerous operation. Real deployment reachability and impact require maintainer review.",
         "root_cause": f"Input tracked from line {finding['source_line']} reaches the dangerous operation at line {finding['sink_line']} without a modeled transformation that removes attacker control.",
-        "default_configuration_evidence": "The analyzed code path invokes the recorded sink directly; deployment defaults were not changed by the harness.",
-        "upstream_guard_analysis": "The bounded semantic scan found no supported guard on this source-to-sink path. A maintainer must review framework middleware and callers.",
+        "default_configuration_evidence": f'{reachability.get("verdict")}: {reachability.get("reason")}',
+        "upstream_guard_analysis": "The bounded semantic scan did not model a sanitizing transformation on the cited path. Framework middleware, alternate callers, and guards still require maintainer review.",
         "negative_control_explanation": "The benign input completed without the unique attack marker; only the crafted input produced it.",
         "remediation": "Avoid interpreting attacker-controlled text as code or a shell command; use fixed operations and validated structured arguments.",
         "reproduction_steps": ["Use the pinned analyzed commit", "Run the supplied resource-limited PoC verifier", "Compare benign and crafted observations"],
@@ -864,6 +1139,7 @@ def _automatic_claim(finding: dict, duplicate_review: dict) -> dict:
         "vendor_or_web": "Not automatically queried beyond the collected snapshot; manual review is required before submission.",
         "duplicate_analysis": duplicate_text,
     }
+    claim["evidence_gate"] = evidence_gate
     return claim
 
 
@@ -871,12 +1147,18 @@ class ResearchOrchestrator:
     """Run bounded reproduction stages and leave all external report submission to a human."""
     def run(self, audit_file: Path, max_candidates: int = 3, container: bool = False, timeline_db: Path | None = None) -> Path:
         audit_data = json.loads(audit_file.read_text(encoding="utf-8"))
-        ranked = SemanticAnalysisAgent().run(audit_data.get("hypotheses", []))
+        ranked = SemanticAnalysisAgent().run(audit_data.get("hypotheses", []), audit_data.get("profile", {}))
         results = []
         for finding in ranked[:max_candidates]:
             result = {"finding_id": finding["id"], "priority": finding["priority"], "stages": {}, "status": "blocked"}
-            result["stages"]["semantic_analysis"] = {"status": "ready" if finding["auto_reproduction_supported"] else "unsupported", "reason": finding["automation_reason"]}
+            result["stages"]["semantic_analysis"] = {"status": "ready" if finding["auto_reproduction_supported"] else "unsupported", "reason": finding["automation_reason"], "priority_reasons": finding.get("priority_reasons", []), "trace": finding.get("trace", [])}
             if not finding["auto_reproduction_supported"]:
+                results.append(result)
+                continue
+            reachability = ReachabilityGateAgent().run(finding, audit_data.get("profile", {}))
+            result["stages"]["reachability_gate"] = reachability
+            if reachability["status"] != "pass":
+                result["status"] = "reachability_review_required"
                 results.append(result)
                 continue
             environment = BuildEnvironmentAgent().run(Path(audit_data["checkout"]), finding)
@@ -886,7 +1168,14 @@ class ResearchOrchestrator:
                 continue
             destination = audit_file.parent / finding["id"]
             if (destination / "GHSA_CANDIDATE.md").is_file() and (destination / "CVE_REQUEST_BRIEF.md").is_file():
-                result.update(status="draft_ready", stages={**result["stages"], "disclosure": {"status": "already_generated", "submission": "manual_only"}})
+                evidence_path = destination / "evidence.json"
+                duplicate_review = DuplicateReviewAgent().run(audit_data, finding)
+                result["stages"]["duplicate_review"] = duplicate_review
+                if evidence_path.is_file():
+                    evidence_gate = EvidenceGateAgent().run(audit_data, finding, reachability, json.loads(evidence_path.read_text(encoding="utf-8")), duplicate_review)
+                    result["stages"]["evidence_gate"] = evidence_gate
+                    result["status"] = "draft_ready" if evidence_gate["verdict"] in {"CONFIRMED", "CONFIRMED_LOW"} else "review_required"
+                result["stages"]["disclosure"] = {"status": "already_generated", "submission": "manual_only"}
                 results.append(result)
                 continue
             try:
@@ -914,7 +1203,13 @@ class ResearchOrchestrator:
                     result["status"] = "duplicate_review_required"
                     results.append(result)
                     continue
-                claim = _automatic_claim(finding, duplicate_review)
+                evidence_gate = EvidenceGateAgent().run(audit_data, finding, reachability, evidence, duplicate_review)
+                result["stages"]["evidence_gate"] = evidence_gate
+                if evidence_gate["verdict"] not in {"CONFIRMED", "CONFIRMED_LOW"}:
+                    result["status"] = "review_required"
+                    results.append(result)
+                    continue
+                claim = _automatic_claim(finding, duplicate_review, reachability, evidence_gate)
                 claim_file = destination / "claim.json"
                 claim_file.write_text(json.dumps(claim, ensure_ascii=False, indent=2), encoding="utf-8")
                 ghsa, cve = DisclosureAgent().run(audit_file, finding["id"], claim_file, evidence_file)

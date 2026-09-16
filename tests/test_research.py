@@ -46,11 +46,26 @@ class ResearchTests(unittest.TestCase):
             self.assertEqual(len(linked), 1)
             self.assertEqual(linked[0].kind, "command_injection")
 
+    def test_python_scan_traces_multiple_modules_and_records_path(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "app.py").write_text('''from service import forward\n\nclass App:\n    def post(self, path):\n        return lambda fn: fn\napp = App()\n\n@app.post("/run")\ndef route(command):\n    return forward(command)\n''', encoding="utf-8")
+            (root / "service.py").write_text('''from helpers import execute\n\ndef forward(value):\n    return execute(value)\n''', encoding="utf-8")
+            (root / "helpers.py").write_text('''import subprocess\n\ndef execute(value):\n    return subprocess.run(value, shell=True)\n''', encoding="utf-8")
+            findings, _ = SourceScanAgent().run(root, "fixture/multihop", "d" * 40)
+            linked = [item for item in findings if item.function == "route" and item.sink_path == "helpers.py"]
+            self.assertEqual(len(linked), 1)
+            self.assertEqual(linked[0].source_path, "app.py")
+            self.assertEqual(linked[0].entry_kind, "http_route")
+            self.assertGreaterEqual(len(linked[0].trace), 4)
+            self.assertEqual([step["role"] for step in linked[0].trace][0], "source")
+            self.assertEqual([step["role"] for step in linked[0].trace][-1], "sink")
+
     def test_repository_profile_records_packages_languages_and_entrypoints(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             shutil.copyfile(FIXTURE, root / "app.py")
-            (root / "pyproject.toml").write_text('[project]\nname="fixture"\ndependencies=["requests>=2"]\n', encoding="utf-8")
+            (root / "pyproject.toml").write_text('[project]\nname="fixture"\ndependencies=["requests>=2", "flask>=3"]\n', encoding="utf-8")
             (root / "poetry.lock").write_text("", encoding="utf-8")
             (root / "worker.go").write_text("package main\nfunc main() {}\n", encoding="utf-8")
             profile = RepositoryProfilerAgent().run(root)
@@ -58,8 +73,10 @@ class ResearchTests(unittest.TestCase):
             self.assertEqual(profile["languages"]["go"], 1)
             self.assertEqual(profile["manifests"], ["pyproject.toml"])
             self.assertEqual(profile["lockfiles"], ["poetry.lock"])
-            self.assertEqual(profile["dependency_count"], 1)
+            self.assertEqual(profile["dependency_count"], 2)
             self.assertEqual(profile["dependencies"][0]["name"], "requests")
+            self.assertIn("Flask", profile["frameworks"])
+            self.assertEqual(profile["project_kind"], "service")
             self.assertTrue({item["kind"] for item in profile["entrypoints"]} >= {"http", "cli"})
 
     def test_poc_controls_and_disclosure_gate(self):
@@ -142,10 +159,14 @@ print(result.stdout)
             self.assertEqual(result["external_submission"], "disabled_manual_only")
             self.assertEqual(result["results"][0]["status"], "draft_ready")
             self.assertEqual(result["results"][0]["stages"]["disclosure"]["submission"], "manual_only")
+            self.assertEqual(result["results"][0]["stages"]["reachability_gate"]["status"], "pass")
+            self.assertIn(result["results"][0]["stages"]["evidence_gate"]["verdict"], {"CONFIRMED", "CONFIRMED_LOW"})
+            self.assertEqual(result["results"][0]["stages"]["evidence_gate"]["criteria"]["C5_no_known_duplicate"], "PASS")
             destination = audit_file.parent / result["results"][0]["finding_id"]
             self.assertTrue((destination / "evidence.json").is_file())
             self.assertTrue((destination / "GHSA_CANDIDATE.md").is_file())
             self.assertTrue((destination / "CVE_REQUEST_BRIEF.md").is_file())
+            self.assertIn("## Evidence gate", (destination / "GHSA_CANDIDATE.md").read_text())
             store = Store(database)
             timeline = store.report("fixture/synthetic")
             self.assertEqual(timeline["research_runs"][0]["status"], "draft_ready")
@@ -167,6 +188,34 @@ print(result.stdout)
             self.assertEqual(result["status"], "duplicate_review_required")
             self.assertEqual(result["stages"]["duplicate_review"]["status"], "possible_duplicate")
             self.assertFalse((audit_file.parent / result["finding_id"] / "GHSA_CANDIDATE.md").exists())
+
+    def test_orchestrator_reproduces_cross_module_route_trace(self):
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)
+            repo = folder / "repo"
+            repo.mkdir()
+            (repo / "app.py").write_text('''from service import forward\n\nclass App:\n    def post(self, path):\n        return lambda fn: fn\napp = App()\n\n@app.post("/run")\ndef route(command):\n    return forward(command)\n''', encoding="utf-8")
+            (repo / "service.py").write_text('''from helpers import execute\n\ndef forward(value):\n    return execute(value)\n''', encoding="utf-8")
+            (repo / "helpers.py").write_text('''import subprocess\n\ndef execute(value):\n    return subprocess.run(value, shell=True, capture_output=True, text=True)\n''', encoding="utf-8")
+            subprocess.run(["git", "init", "-q", str(repo)], check=True)
+            subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+            subprocess.run(["git", "-C", str(repo), "-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "-qm", "fixture"], check=True)
+            database = folder / "timeline.sqlite3"
+            store = Store(database)
+            store.save(Collection("fixture/multihop"))
+            store.db.close()
+            audit_file = audit(repo, "fixture/multihop", folder / "research", timeline_db=database)
+            output = ResearchOrchestrator().run(audit_file, max_candidates=1, timeline_db=database)
+            result = json.loads(output.read_text())["results"][0]
+            self.assertEqual(result["status"], "draft_ready")
+            self.assertEqual(result["stages"]["evidence_gate"]["verdict"], "CONFIRMED")
+            self.assertGreaterEqual(len(result["stages"]["semantic_analysis"]["trace"]), 4)
+            store = Store(database)
+            tracked = store.report("fixture/multihop")["research_findings"][0]
+            store.db.close()
+            self.assertEqual(tracked["source_path"], "app.py")
+            self.assertEqual(tracked["sink_path"], "helpers.py")
+            self.assertGreaterEqual(len(tracked["trace"]), 4)
 
 
 if __name__ == "__main__":

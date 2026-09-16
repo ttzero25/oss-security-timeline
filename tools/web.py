@@ -29,8 +29,10 @@ AGENT_DESCRIPTIONS = {
     "CandidateAgent": "보안 관련 공개 변경의 검토 후보 선별",
     "RepositoryProfilerAgent": "언어·패키지 파일·lockfile·외부 엔트리포인트 조사 범위 기록",
     "SourceScanAgent": "코드의 입력 경로와 위험 동작 연결 가설 탐색",
+    "ReachabilityGateAgent": "기본 설정의 외부 엔트리포인트에서 후보 경로 도달 여부 검증",
     "ResearchOrchestrator": "후보 우선순위화와 제한된 격리 재현 단계 조율",
     "PocValidatorAgent": "정상·공격 입력의 격리 PoC 결과 대조",
+    "EvidenceGateAgent": "도달성·기본 설정·입력 통제·영향·중복의 5개 근거 판정",
     "DisclosureAgent": "검증 근거에 기반한 비공개 제보 초안 생성",
 }
 
@@ -383,8 +385,17 @@ def lab(selected: str | None, report: dict | None, audits: list[dict], job: dict
         code_scope = f'조사 파일 {inspected}개 · 지원 언어 {languages}' if inspected is not None else "아직 코드 조사 기록이 없습니다"
         if code_coverage.get("truncated"):
             code_scope += " · 파일 상한으로 조사 잘림"
-        candidates = "".join(f'<tr><td>{esc(x.get("id"))}</td><td>{esc(x.get("kind"))}</td><td>{esc(x.get("path"))}:{esc(x.get("sink_line"))}</td><td>{esc(verdicts.get(x.get("id"), {}).get("status", "가설"))}</td></tr>' for x in hypotheses)
+        candidate_rows = []
+        for finding in hypotheses:
+            verdict = verdicts.get(finding.get("id"), {})
+            stages = verdict.get("stages", {})
+            trace = " → ".join(f'{step.get("role")}:{step.get("path")}:{step.get("line")}' for step in finding.get("trace", [])) or f'{finding.get("path")}:{finding.get("sink_line")}'
+            gate = stages.get("evidence_gate", {}).get("verdict") or stages.get("reachability_gate", {}).get("verdict") or "미검증"
+            candidate_rows.append(f'<tr><td>{esc(finding.get("id"))}</td><td>{esc(finding.get("kind"))}</td><td>{esc(trace)}</td><td>{esc(verdict.get("status", "가설"))}</td><td>{esc(gate)}</td></tr>')
+        candidates = "".join(candidate_rows)
         language_text = ", ".join(f"{name} {amount}" for name, amount in profile.get("languages", {}).items()) or "미확인"
+        framework_text = ", ".join(profile.get("frameworks", [])) or "자동 식별 없음"
+        recent_changes = profile.get("recent_changes", {})
         profile_rows = "".join(f'<tr><td>{esc(item.get("kind"))}</td><td>{esc(item.get("path"))}:{esc(item.get("line"))}</td><td>{esc(item.get("code"))}</td></tr>' for item in profile.get("entrypoints", [])[:50])
         research_rows = "".join(f'<tr><td>{esc(str(x.get("at") or "")[:19])}</td><td>{esc(x.get("kind"))}</td><td>{esc(x.get("finding_id") or "-")}</td><td>{esc(x.get("status"))}</td></tr>' for x in report.get("research_timeline", [])[:50])
         versions = "".join(f'<tr><td>{esc(x["advisory_id"])}</td><td>{esc(x["ecosystem"])} / {esc(x["name"])}</td><td>{esc(x["version_range"] or "미기재")}</td><td>{esc(x["patched"] or "미기재")}</td></tr>' for x in report.get("fix_versions", []))
@@ -402,8 +413,8 @@ def lab(selected: str | None, report: dict | None, audits: list[dict], job: dict
             compare_note += " 참조 커밋은 처음 5개만 수집했습니다."
         details = f'''<section><div class="section-heading"><div><span class="eyebrow">SELECTED REPOSITORY</span><h2>{esc(selected)}</h2></div><span class="pill">마지막 수집 {esc(str(repo_data.get("last_sync") or "")[:16])} UTC</span></div><div class="metrics compact">{metric("고유 공지", count, "저장소 연관 공지")}{metric("변경 기록", len(changes), "표시 범위 최대 300건")}{metric("코드 가설", len(hypotheses), "미검증 후보")}</div><p class="coverage">수집 범위: {esc(coverage)}<br>경고: {esc(warnings)}</p></section>
 <section><div class="section-heading"><div><span class="eyebrow">ADVISORY TRACKING</span><h2>보안 공지 추적</h2></div><p>CWE는 공지 원문에 명시된 값만 표시</p></div>{table(["시각", "기록", "식별자", "CVE", "취약점 유형 (CWE)", "공지", "심각도"], rows) if rows else empty("이 저장소의 보안 공지 기록이 아직 없습니다.")}</section>
-<section><div class="section-heading"><div><span class="eyebrow">ZERO-DAY RESEARCH</span><h2>미공개 취약점 조사</h2></div><p>후보 ≠ 발견 확정</p></div><div class="notice subdued">소스 스캔은 검토 가설만 만듭니다. 제로데이 판정에는 영향 재현, 중복 공지 확인, 사람의 검토가 필요합니다.</div><p class="coverage">{esc(code_scope)}. 미지원 언어·패턴의 후보 0건은 안전성의 증거가 아닙니다.</p>{table(["후보 ID", "분류", "코드 위치", "상태"], candidates) if candidates else empty("코드 가설이 없습니다. 조사 완료 여부와 스캔 범위를 확인하세요.")}</section>'''
-        details += f'''<section><div class="section-heading"><div><span class="eyebrow">REPOSITORY PROFILE</span><h2>코드·패키지 조사 범위</h2></div><p>커밋 {esc((audit_result or {}).get("commit", "")[:12])}</p></div><div class="metrics compact">{metric("확인 파일", profile.get("files_seen", 0), "vendor·생성 디렉터리 제외")}{metric("코드 파일", profile.get("code_files", 0), language_text)}{metric("의존성 항목", profile.get("dependency_count", 0), ", ".join(f"{k} {v}" for k, v in profile.get("dependency_ecosystems", {}).items()) or "지원 lockfile 기준")}</div><p class="coverage">매니페스트 {len(profile.get("manifests", []))}개 · lockfile {len(profile.get("lockfiles", []))}개 · 엔트리포인트 {len(profile.get("entrypoints", []))}개 · 미지원 코드 {profile.get("unsupported_code_files", 0)}개 · 프로필 잘림 {"예" if profile.get("truncated") else "아니오"} · 의존성 잘림 {"예" if profile.get("dependencies_truncated") else "아니오"}</p>{table(["입력 유형", "위치", "코드"], profile_rows) if profile_rows else empty("자동 식별된 엔트리포인트가 없습니다.")}</section><section><div class="section-heading"><div><span class="eyebrow">RESEARCH TIMELINE</span><h2>조사 상태 이력</h2></div><p>공개 공지와 별도 기록</p></div>{table(["시각", "단계", "후보", "상태"], research_rows) if research_rows else empty("아직 저장된 연구 이벤트가 없습니다.")}</section>'''
+<section><div class="section-heading"><div><span class="eyebrow">ZERO-DAY RESEARCH</span><h2>미공개 취약점 조사</h2></div><p>후보 ≠ 발견 확정</p></div><div class="notice subdued">소스 스캔은 검토 가설만 만듭니다. 제로데이 판정에는 영향 재현, 중복 공지 확인, 사람의 검토가 필요합니다.</div><p class="coverage">{esc(code_scope)}. 미지원 언어·패턴의 후보 0건은 안전성의 증거가 아닙니다.</p>{table(["후보 ID", "분류", "입력→호출→위험 동작", "상태", "근거 게이트"], candidates) if candidates else empty("코드 가설이 없습니다. 조사 완료 여부와 스캔 범위를 확인하세요.")}</section>'''
+        details += f'''<section><div class="section-heading"><div><span class="eyebrow">REPOSITORY PROFILE</span><h2>코드·패키지 조사 범위</h2></div><p>커밋 {esc((audit_result or {}).get("commit", "")[:12])}</p></div><div class="metrics compact">{metric("확인 파일", profile.get("files_seen", 0), "vendor·생성 디렉터리 제외")}{metric("코드 파일", profile.get("code_files", 0), language_text)}{metric("의존성 항목", profile.get("dependency_count", 0), ", ".join(f"{k} {v}" for k, v in profile.get("dependency_ecosystems", {}).items()) or "지원 lockfile 기준")}</div><p class="coverage">유형 {esc(profile.get("project_kind", "미확인"))} · 프레임워크 {esc(framework_text)} · 최근 변경 분석 커밋 {recent_changes.get("commits_considered", 0)}개/파일 {len(recent_changes.get("files", {}))}개<br>매니페스트 {len(profile.get("manifests", []))}개 · lockfile {len(profile.get("lockfiles", []))}개 · 엔트리포인트 {len(profile.get("entrypoints", []))}개 · 미지원 코드 {profile.get("unsupported_code_files", 0)}개 · 프로필 잘림 {"예" if profile.get("truncated") else "아니오"} · 의존성 잘림 {"예" if profile.get("dependencies_truncated") else "아니오"}</p>{table(["입력 유형", "위치", "코드"], profile_rows) if profile_rows else empty("자동 식별된 엔트리포인트가 없습니다.")}</section><section><div class="section-heading"><div><span class="eyebrow">RESEARCH TIMELINE</span><h2>조사 상태 이력</h2></div><p>공개 공지와 별도 기록</p></div>{table(["시각", "단계", "후보", "상태"], research_rows) if research_rows else empty("아직 저장된 연구 이벤트가 없습니다.")}</section>'''
         details += f'''<section><div class="section-heading"><div><span class="eyebrow">BEFORE / AFTER</span><h2>Fix 전후 비교</h2></div><p>버전과 공지 참조 커밋 기준</p></div><div class="notice subdued">{esc(compare_note)}</div><h3>영향 버전 → 패치 버전</h3>{table(["공지", "패키지", "영향 범위", "패치 버전"], versions) if versions else empty("공지에 연결된 패키지 버전 정보가 없습니다.")}<h3 class="subheading">참조 커밋의 변경 줄</h3>{diff_cards or empty("저장된 공지 참조 커밋 비교가 없습니다. 새로 수집한 공지에 수정 커밋 링크가 없다면 코드 전후를 자동 연결하지 않습니다.")}</section>'''
     elif selected:
         details = "<section>" + empty("아직 이 저장소의 수집 기록이 없습니다. 조사 상태를 확인하세요.") + "</section>"

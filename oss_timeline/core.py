@@ -435,7 +435,7 @@ class Store:
             CREATE TABLE IF NOT EXISTS events (repo TEXT NOT NULL, id TEXT NOT NULL, kind TEXT NOT NULL, at TEXT NOT NULL, title TEXT, url TEXT, first_seen TEXT NOT NULL, PRIMARY KEY(repo, id));
             CREATE TABLE IF NOT EXISTS findings (repo TEXT NOT NULL, id TEXT NOT NULL, at TEXT NOT NULL, title TEXT, url TEXT, reasons TEXT, paths TEXT NOT NULL DEFAULT '[]', evidence TEXT NOT NULL DEFAULT '[]', status TEXT, PRIMARY KEY(repo, id));
             CREATE TABLE IF NOT EXISTS research_runs (repo TEXT NOT NULL, commit_hash TEXT NOT NULL, started_at TEXT NOT NULL, finished_at TEXT NOT NULL, status TEXT NOT NULL, execution_mode TEXT NOT NULL, coverage TEXT NOT NULL, profile TEXT NOT NULL, summary_path TEXT NOT NULL, PRIMARY KEY(repo,commit_hash));
-            CREATE TABLE IF NOT EXISTS research_findings (repo TEXT NOT NULL, tracking_id TEXT NOT NULL, finding_id TEXT NOT NULL, commit_hash TEXT NOT NULL, kind TEXT NOT NULL, path TEXT NOT NULL, source_line INTEGER, sink_line INTEGER, priority INTEGER, status TEXT NOT NULL, first_seen TEXT NOT NULL, last_seen TEXT NOT NULL, PRIMARY KEY(repo,tracking_id));
+            CREATE TABLE IF NOT EXISTS research_findings (repo TEXT NOT NULL, tracking_id TEXT NOT NULL, finding_id TEXT NOT NULL, commit_hash TEXT NOT NULL, kind TEXT NOT NULL, path TEXT NOT NULL, source_path TEXT NOT NULL DEFAULT '', sink_path TEXT NOT NULL DEFAULT '', source_line INTEGER, sink_line INTEGER, trace TEXT NOT NULL DEFAULT '[]', priority INTEGER, status TEXT NOT NULL, first_seen TEXT NOT NULL, last_seen TEXT NOT NULL, PRIMARY KEY(repo,tracking_id));
             CREATE TABLE IF NOT EXISTS research_events (event_id TEXT PRIMARY KEY, repo TEXT NOT NULL, tracking_id TEXT, finding_id TEXT, commit_hash TEXT NOT NULL, at TEXT NOT NULL, kind TEXT NOT NULL, status TEXT NOT NULL, detail TEXT NOT NULL);
         """)
         columns = {x["name"] for x in self.db.execute("PRAGMA table_info(findings)")}
@@ -443,6 +443,13 @@ class Store:
             self.db.execute("ALTER TABLE findings ADD COLUMN paths TEXT NOT NULL DEFAULT '[]'")
         if "evidence" not in columns:
             self.db.execute("ALTER TABLE findings ADD COLUMN evidence TEXT NOT NULL DEFAULT '[]'")
+        research_columns = {x["name"] for x in self.db.execute("PRAGMA table_info(research_findings)")}
+        if "source_path" not in research_columns:
+            self.db.execute("ALTER TABLE research_findings ADD COLUMN source_path TEXT NOT NULL DEFAULT ''")
+        if "sink_path" not in research_columns:
+            self.db.execute("ALTER TABLE research_findings ADD COLUMN sink_path TEXT NOT NULL DEFAULT ''")
+        if "trace" not in research_columns:
+            self.db.execute("ALTER TABLE research_findings ADD COLUMN trace TEXT NOT NULL DEFAULT '[]'")
         advisory_columns = {x["name"] for x in self.db.execute("PRAGMA table_info(advisories)")}
         if "cwe_ids" not in advisory_columns:
             self.db.execute("ALTER TABLE advisories ADD COLUMN cwe_ids TEXT NOT NULL DEFAULT '[]'")
@@ -508,8 +515,11 @@ class Store:
                 status = result.get("status", "hypothesis")
                 existing = self.db.execute("SELECT first_seen FROM research_findings WHERE repo=? AND tracking_id=?", (repo, tracking_id)).fetchone()
                 first_seen = existing["first_seen"] if existing else stamp
-                self.db.execute("INSERT INTO research_findings(repo,tracking_id,finding_id,commit_hash,kind,path,source_line,sink_line,priority,status,first_seen,last_seen) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(repo,tracking_id) DO UPDATE SET finding_id=excluded.finding_id,commit_hash=excluded.commit_hash,kind=excluded.kind,path=excluded.path,source_line=excluded.source_line,sink_line=excluded.sink_line,priority=excluded.priority,status=excluded.status,last_seen=excluded.last_seen", (repo, tracking_id, finding["id"], commit, finding.get("kind", "unknown"), finding.get("path", ""), finding.get("source_line"), finding.get("sink_line"), result.get("priority"), status, first_seen, stamp))
-                for event_kind, event_status, detail in (("candidate_observed", "hypothesis", {"path": finding.get("path"), "sink_line": finding.get("sink_line")}), ("research_verdict", status, result.get("stages", {}))):
+                source_path = finding.get("source_path") or finding.get("path", "")
+                sink_path = finding.get("sink_path") or finding.get("path", "")
+                trace = finding.get("trace", [])
+                self.db.execute("INSERT INTO research_findings(repo,tracking_id,finding_id,commit_hash,kind,path,source_path,sink_path,source_line,sink_line,trace,priority,status,first_seen,last_seen) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(repo,tracking_id) DO UPDATE SET finding_id=excluded.finding_id,commit_hash=excluded.commit_hash,kind=excluded.kind,path=excluded.path,source_path=excluded.source_path,sink_path=excluded.sink_path,source_line=excluded.source_line,sink_line=excluded.sink_line,trace=excluded.trace,priority=excluded.priority,status=excluded.status,last_seen=excluded.last_seen", (repo, tracking_id, finding["id"], commit, finding.get("kind", "unknown"), finding.get("path", ""), source_path, sink_path, finding.get("source_line"), finding.get("sink_line"), json.dumps(trace, ensure_ascii=False), result.get("priority"), status, first_seen, stamp))
+                for event_kind, event_status, detail in (("candidate_observed", "hypothesis", {"source_path": source_path, "sink_path": sink_path, "source_line": finding.get("source_line"), "sink_line": finding.get("sink_line"), "trace": trace}), ("research_verdict", status, result.get("stages", {}))):
                     event_id = hashlib.sha256(f"{repo}|{commit}|{tracking_id}|{event_kind}|{event_status}".encode()).hexdigest()
                     self.db.execute("INSERT OR IGNORE INTO research_events VALUES(?,?,?,?,?,?,?,?,?)", (event_id, repo, tracking_id, finding["id"], commit, stamp, event_kind, event_status, json.dumps(detail, ensure_ascii=False)))
 
@@ -519,7 +529,7 @@ class Store:
             raise ValueError("저장되지 않은 저장소입니다")
         scope = [x["name"] for x in repositories]
         if not scope:
-            return {"repositories": [], "ranking": [], "packages": [], "fix_versions": [], "timeline": [], "findings": [], "advisory_observations": [], "research_timeline": [], "research_runs": [], "forecast": {"status": "insufficient_data"}}
+            return {"repositories": [], "ranking": [], "packages": [], "fix_versions": [], "timeline": [], "findings": [], "advisory_observations": [], "research_timeline": [], "research_runs": [], "research_findings": [], "forecast": {"status": "insufficient_data"}}
         marks = ",".join("?" for _ in scope)
         ranking = [dict(x) for x in self.db.execute(f"SELECT repo,COUNT(DISTINCT advisory_id) AS advisories FROM advisory_repos WHERE repo IN ({marks}) GROUP BY repo ORDER BY advisories DESC,repo", scope)]
         packages = [dict(x) for x in self.db.execute(f"SELECT repo,ecosystem,name,COUNT(DISTINCT advisory_id) AS advisories FROM advisory_packages WHERE repo IN ({marks}) GROUP BY repo,ecosystem,name ORDER BY advisories DESC,repo,name", scope)]
@@ -540,12 +550,15 @@ class Store:
         observations = [dict(x) for x in self.db.execute(f"SELECT ao.advisory_id,ao.observed_at,ao.modified_at,ar.repo FROM advisory_observations ao JOIN advisory_repos ar ON ar.advisory_id=ao.advisory_id WHERE ar.repo IN ({marks}) ORDER BY ao.observed_at DESC LIMIT ?", [*scope, limit])]
         research_timeline = [dict(x) for x in self.db.execute(f"SELECT * FROM research_events WHERE repo IN ({marks}) ORDER BY at DESC LIMIT ?", [*scope, limit])]
         research_runs = [dict(x) for x in self.db.execute(f"SELECT * FROM research_runs WHERE repo IN ({marks}) ORDER BY finished_at DESC", scope)]
+        research_findings = [dict(x) for x in self.db.execute(f"SELECT * FROM research_findings WHERE repo IN ({marks}) ORDER BY last_seen DESC", scope)]
         for item in research_timeline:
             item["detail"] = json.loads(item["detail"])
         for item in research_runs:
             item["coverage"] = json.loads(item["coverage"])
             item["profile"] = json.loads(item["profile"])
-        return {"generated_at": now(), "repositories": repositories, "ranking": ranking, "packages": packages, "fix_versions": fix_versions, "timeline": timeline, "findings": findings, "advisory_observations": observations, "research_timeline": research_timeline, "research_runs": research_runs, "forecast": forecast(publications)}
+        for item in research_findings:
+            item["trace"] = json.loads(item["trace"])
+        return {"generated_at": now(), "repositories": repositories, "ranking": ranking, "packages": packages, "fix_versions": fix_versions, "timeline": timeline, "findings": findings, "advisory_observations": observations, "research_timeline": research_timeline, "research_runs": research_runs, "research_findings": research_findings, "forecast": forecast(publications)}
 
 
 def synchronize(client: HttpClient, store: Store, repo: str, max_pages: int = 100, max_manifests: int = 100) -> Collection:
