@@ -1379,6 +1379,14 @@ def _c_source_variable(line: str) -> str | None:
     return scan.group(1) if scan else None
 
 
+def _c_direct_external_expression(expression: str) -> bool:
+    return bool(
+        re.search(r"\bargv\s*\[", expression)
+        or re.search(r"\b(?:getenv|getopt|getopt_long)\s*\(", expression)
+        or re.search(r"\b(?:recv|recvfrom|read|fgets|gets)\s*\(", expression)
+    )
+
+
 def _c_bounded_size(expression: str, destination: str, capacity: int) -> bool:
     compact = re.sub(r"\s+", "", expression)
     if compact in {f"sizeof({destination})", f"sizeof{destination}"}:
@@ -1453,7 +1461,8 @@ def _c_memory_hypotheses(lines: list[str], path: str, repo: str, commit: str) ->
                     if not unsafe and length_source and not _c_length_guarded(lines, function_start, number - 1, length, destination, capacity):
                         unsafe = True
                 elif name in {"memcpy", "memmove"}:
-                    tainted = source is not None
+                    direct_external = _c_direct_external_expression(" ".join(arguments[1:]))
+                    tainted = source is not None or direct_external
                     unsafe = tainted and not _c_bounded_size(length, destination, capacity) and not _c_length_guarded(lines, max(function_start, (source or (declaration_line, "", ""))[0] - 1), number - 1, length, destination, capacity)
                 if unsafe:
                     source_line, source_code = (source[0], source[1]) if source else (number, line)
@@ -1510,12 +1519,18 @@ def _c_hypotheses(filename: Path, root: Path, repo: str, commit: str) -> list[Hy
                 if first.startswith('"'):
                     continue
             source = next((item for item in reversed(recent) if re.search(r"\b" + re.escape(item[2]) + r"\b", arguments)), None)
-            if source:
-                between = "\n".join(lines[source[0] : number - 1])
-                length_guard = re.search(r"\bstrlen\s*\(\s*(?:\([^)]*\)\s*)?" + re.escape(source[2]) + r"\s*\)[^;\n]{0,160}(?:>=|>)\s*sizeof\s*\(", between)
+            direct_external = _c_direct_external_expression(arguments)
+            if source or direct_external:
+                source_line, source_code, source_name = source if source else (number, line, "")
+                between = "\n".join(lines[source_line : number - 1])
+                length_guard = re.search(r"\bstrlen\s*\(\s*(?:\([^)]*\)\s*)?" + re.escape(source_name) + r"\s*\)[^;\n]{0,160}(?:>=|>)\s*sizeof\s*\(", between) if source_name else None
                 if kind == "unsafe_copy" and length_guard and re.search(r"\b(?:return|goto)\b", between[length_guard.start() :]):
                     continue
-                output.append(_hypothesis(repo, commit, kind, path, source[0], number, source[1], line, function))
+                trace = [
+                    {"role": "source", "path": path, "line": source_line, "function": function, "code": source_code.strip()[:240]},
+                    {"role": "sink", "path": path, "line": number, "function": function, "code": line.strip()[:240]},
+                ]
+                output.append(_hypothesis(repo, commit, kind, path, source_line, number, source_code, line, function, entry_kind="modeled_external_input", trace=trace))
         propagation = re.search(r"\b[A-Za-z_]\w*\s*\((.*)", line)
         if propagation:
             references = _go_refs(re.sub(r"\bsizeof\s*\([^)]*\)", "", propagation.group(1)))
@@ -1588,6 +1603,19 @@ class SemanticAnalysisAgent:
     """Prioritize hypotheses and allow automatic reproduction only for bounded safe templates."""
     SCORES = {"buffer_overflow": 92, "command_injection": 90, "workflow_injection": 88, "authentication_bypass": 85, "code_execution": 85, "privilege_assignment": 84, "authorization_scope_candidate": 82, "template_injection": 80, "sql_injection": 75, "concurrency_race_candidate": 72, "unsafe_deserialization": 70, "toctou_candidate": 68, "path_traversal": 65, "possible_ssrf": 60, "format_string": 55, "unsafe_copy": 50}
 
+    @staticmethod
+    def _path_quality(path: str) -> tuple[str, int, str | None]:
+        normalized = path.replace("\\", "/").lower()
+        parts = {part for part in normalized.split("/") if part}
+        filename = normalized.rsplit("/", 1)[-1]
+        if parts & {"test", "tests", "__tests__", "fixtures", "fixture"} or filename.startswith("test_") or any(marker in filename for marker in (".test.", ".spec.")):
+            return "test_or_fixture", -22, "테스트·fixture 경로 -22"
+        if parts & {"example", "examples", "sample", "samples", "demo", "demos", "docs", "bench", "benchmark", "benchmarks"}:
+            return "example_or_documentation", -16, "예제·문서·벤치마크 경로 -16"
+        if parts & {"tools", "scripts", "skills", ".agents", ".github"}:
+            return "tooling", -7, "보조 도구·자동화 경로 -7"
+        return "production", 0, None
+
     def run(self, hypotheses: list[dict], profile: dict | None = None) -> list[dict]:
         changed = (profile or {}).get("recent_changes", {}).get("files", {})
         output = []
@@ -1597,7 +1625,7 @@ class SemanticAnalysisAgent:
                 finding.get("kind") in {"command_injection", "code_execution"}
                 or finding.get("kind") in {"possible_ssrf", "sql_injection", "path_traversal", "unsafe_deserialization", "template_injection"} and (finding.get("source_path") or finding.get("path")) == (finding.get("sink_path") or finding.get("path"))
             )
-            javascript_supported = suffix in {".js", ".mjs", ".cjs"} and finding.get("kind") in {"command_injection", "code_execution"} and (finding.get("source_path") or finding.get("path")) == (finding.get("sink_path") or finding.get("path"))
+            javascript_supported = suffix in {".js", ".mjs", ".cjs", ".ts", ".mts", ".cts"} and finding.get("kind") in {"command_injection", "code_execution"} and (finding.get("source_path") or finding.get("path")) == (finding.get("sink_path") or finding.get("path"))
             go_supported = suffix == ".go" and finding.get("kind") == "command_injection" and (finding.get("source_path") or finding.get("path")) == (finding.get("sink_path") or finding.get("path"))
             supported = python_supported or javascript_supported or go_supported
             score = self.SCORES.get(finding.get("kind"), 40)
@@ -1613,9 +1641,45 @@ class SemanticAnalysisAgent:
             if len(finding.get("trace", [])) >= 3:
                 score += 3
                 reasons.append("호출 경로 근거 +3")
-            runtime = "Python" if python_supported else "JavaScript" if javascript_supported else "Go" if go_supported else ""
-            output.append({**finding, "priority": min(score, 100), "priority_reasons": reasons, "auto_reproduction_supported": supported, "automation_reason": f"제한된 {runtime} 실제 함수 호출 템플릿 지원" if supported else "이 언어·취약점 유형의 안전한 자동 PoC 템플릿이 없음"})
+            path_tier, path_adjustment, path_reason = self._path_quality(finding.get("sink_path") or finding.get("path", ""))
+            score += path_adjustment
+            if path_reason:
+                reasons.append(path_reason)
+            runtime = "Python" if python_supported else "JavaScript/TypeScript" if javascript_supported else "Go" if go_supported else ""
+            output.append({**finding, "priority": max(0, min(score, 100)), "priority_reasons": reasons, "path_tier": path_tier, "auto_reproduction_supported": supported, "automation_reason": f"제한된 {runtime} 실제 함수 호출 템플릿 지원" if supported else "이 언어·취약점 유형의 안전한 자동 PoC 템플릿이 없음"})
         return sorted(output, key=lambda item: (-item["priority"], item.get("path", ""), item.get("sink_line", 0)))
+
+
+def _runtime_family(finding: dict) -> str:
+    suffix = Path(finding.get("sink_path") or finding.get("path", "")).suffix.lower()
+    if suffix == ".py":
+        return "python"
+    if suffix in {".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx"}:
+        return "javascript/typescript"
+    if suffix == ".go":
+        return "go"
+    if suffix in C_EXTENSIONS:
+        return "c/c++"
+    return suffix.lstrip(".") or "other"
+
+
+def _balanced_reproduction_candidates(ranked: list[dict], limit: int) -> list[dict]:
+    """Spend the execution budget only on supported candidates and preserve class diversity."""
+    buckets: dict[tuple[str, str], list[dict]] = {}
+    for finding in ranked:
+        if finding.get("auto_reproduction_supported"):
+            key = (_runtime_family(finding), finding.get("kind", "unknown"))
+            buckets.setdefault(key, []).append(finding)
+    selected: list[dict] = []
+    while len(selected) < max(0, limit):
+        progressed = False
+        for bucket in buckets.values():
+            if bucket and len(selected) < limit:
+                selected.append(bucket.pop(0))
+                progressed = True
+        if not progressed:
+            break
+    return selected
 
 
 class ReachabilityGateAgent:
@@ -1696,12 +1760,21 @@ class BuildEnvironmentAgent:
             if missing:
                 return {"status": "unsupported", "runtime": "python", "reason": "Missing Python imports with dependency installation disabled: " + ", ".join(missing), "manifests": manifests, "dependency_install": "disabled", "dependency_preflight": preflight}
             return {"status": "ready", "runtime": "python", "executable": sys.executable, "image": "python:3.11-slim", "manifests": manifests, "default_execution": "limited_process", "dependency_install": "disabled", "dependency_preflight": preflight}
-        if suffix in {".js", ".mjs", ".cjs"}:
+        if suffix in {".js", ".mjs", ".cjs", ".ts", ".mts", ".cts"}:
             executable = shutil.which("node")
             if not executable:
                 return {"status": "unsupported", "reason": "로컬 Node.js 런타임을 찾지 못했습니다"}
+            runtime = "typescript" if suffix in {".ts", ".mts", ".cts"} else "javascript"
+            if runtime == "typescript":
+                try:
+                    version = subprocess.run([executable, "--version"], capture_output=True, text=True, timeout=5, check=True).stdout.strip()
+                except (OSError, subprocess.SubprocessError) as exc:
+                    return {"status": "unsupported", "runtime": runtime, "reason": f"Node.js 버전을 확인하지 못했습니다: {exc}"}
+                match = re.search(r"v(\d+)", version)
+                if not match or int(match.group(1)) < 22:
+                    return {"status": "unsupported", "runtime": runtime, "reason": "TypeScript 제한 실행에는 내장 type stripping을 제공하는 Node.js 22 이상이 필요합니다", "node_version": version}
             manifests = [name for name in ("package.json", "package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml") if (checkout_root / name).is_file()]
-            return {"status": "ready", "runtime": "javascript", "executable": executable, "image": "node:22-slim", "manifests": manifests, "default_execution": "limited_process", "dependency_install": "disabled"}
+            return {"status": "ready", "runtime": runtime, "executable": executable, "image": "node:22-slim", "manifests": manifests, "default_execution": "limited_process", "dependency_install": "disabled", "typescript_policy": "node_builtin_type_stripping" if runtime == "typescript" else "not_applicable"}
         if suffix == ".go":
             executable = shutil.which("go")
             if not executable:
@@ -1805,7 +1878,7 @@ raise SystemExit(result.returncode)
             proof.write_text(script, encoding="utf-8")
             manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
             return manifest_path
-        if environment.get("runtime") == "javascript":
+        if environment.get("runtime") in {"javascript", "typescript"}:
             try:
                 source_text = source_file.read_text(encoding="utf-8")
             except (OSError, UnicodeError) as exc:
@@ -1840,7 +1913,8 @@ const argument = {"proxy" if use_proxy else "value"};
 const result = await target(...Array(Math.max(target.length, 1)).fill(argument));
 if (result !== undefined) console.log(Buffer.isBuffer(result) ? result.toString() : String(result));
 '''
-            manifest = {"finding_id": finding["id"], "repo_path": audit_data["checkout"], "commit": audit_data["commit"], "image": environment["image"], "proof_file": "proof.mjs", "attack": ["node", "proof.mjs", "attack"], "control": ["node", "proof.mjs", "control"], "observable": {"type": "stdout_contains", "value": marker}, "timeout_seconds": 30, "generator": "bounded_javascript_v1"}
+            generator = "bounded_typescript_v1" if environment.get("runtime") == "typescript" else "bounded_javascript_v1"
+            manifest = {"finding_id": finding["id"], "repo_path": audit_data["checkout"], "commit": audit_data["commit"], "image": environment["image"], "proof_file": "proof.mjs", "attack": ["node", "proof.mjs", "attack"], "control": ["node", "proof.mjs", "control"], "observable": {"type": "stdout_contains", "value": marker}, "timeout_seconds": 30, "generator": generator, "typescript_policy": environment.get("typescript_policy")}
             proof.write_text(script, encoding="utf-8")
             manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
             return manifest_path
@@ -2812,13 +2886,13 @@ class ResearchOrchestrator:
     def run(self, audit_file: Path, max_candidates: int = 3, container: bool = False, timeline_db: Path | None = None) -> Path:
         audit_data = json.loads(audit_file.read_text(encoding="utf-8"))
         ranked = SemanticAnalysisAgent().run(audit_data.get("hypotheses", []), audit_data.get("profile", {}))
+        selected = _balanced_reproduction_candidates(ranked, max_candidates)
+        selected_ids = {finding["id"] for finding in selected}
         results = []
-        for finding in ranked[:max_candidates]:
+        for finding in selected:
             result = {"finding_id": finding["id"], "priority": finding["priority"], "stages": {}, "status": "blocked"}
-            result["stages"]["semantic_analysis"] = {"status": "ready" if finding["auto_reproduction_supported"] else "unsupported", "reason": finding["automation_reason"], "priority_reasons": finding.get("priority_reasons", []), "trace": finding.get("trace", [])}
-            if not finding["auto_reproduction_supported"]:
-                results.append(result)
-                continue
+            result["selection"] = {"status": "selected", "strategy": "language_and_vulnerability_class_round_robin", "runtime": _runtime_family(finding)}
+            result["stages"]["semantic_analysis"] = {"status": "ready", "reason": finding["automation_reason"], "priority_reasons": finding.get("priority_reasons", []), "path_tier": finding.get("path_tier"), "trace": finding.get("trace", [])}
             reachability = ReachabilityGateAgent().run(finding, audit_data.get("profile", {}))
             result["stages"]["reachability_gate"] = reachability
             if reachability["status"] != "pass":
@@ -2847,7 +2921,7 @@ class ResearchOrchestrator:
                 if manifest_file.is_file():
                     existing_manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
                     proof_name = existing_manifest.get("proof_file", "proof.py")
-                    reusable = existing_manifest.get("generator") in {"bounded_python_v1", "bounded_python_ssrf_v1", "bounded_python_sql_v1", "bounded_python_path_v1", "bounded_python_pickle_v1", "bounded_python_template_v1", "bounded_javascript_v1", "bounded_go_v1"} and existing_manifest.get("finding_id") == finding["id"] and existing_manifest.get("commit") == audit_data["commit"] and (destination / proof_name).is_file()
+                    reusable = existing_manifest.get("generator") in {"bounded_python_v1", "bounded_python_ssrf_v1", "bounded_python_sql_v1", "bounded_python_path_v1", "bounded_python_pickle_v1", "bounded_python_template_v1", "bounded_javascript_v1", "bounded_typescript_v1", "bounded_go_v1"} and existing_manifest.get("finding_id") == finding["id"] and existing_manifest.get("commit") == audit_data["commit"] and (destination / proof_name).is_file()
                     if not reusable:
                         raise ValueError("기존 수동 PoC 작업물이 있어 자동 생성으로 덮어쓰지 않습니다")
                     generation_status = "reused"
@@ -2883,6 +2957,16 @@ class ResearchOrchestrator:
             except (OSError, ValueError, RuntimeError, KeyError, json.JSONDecodeError) as exc:
                 result["stages"]["error"] = {"status": "blocked", "message": str(exc)[-500:]}
             results.append(result)
+        unsupported = [finding for finding in ranked if not finding.get("auto_reproduction_supported")]
+        deferred_supported = [finding for finding in ranked if finding.get("auto_reproduction_supported") and finding["id"] not in selected_ids]
+        for finding in unsupported:
+            results.append({
+                "finding_id": finding["id"],
+                "priority": finding["priority"],
+                "status": "automation_unavailable",
+                "selection": {"status": "not_eligible", "strategy": "unsupported_candidates_do_not_consume_execution_budget", "runtime": _runtime_family(finding)},
+                "stages": {"semantic_analysis": {"status": "unsupported", "reason": finding["automation_reason"], "priority_reasons": finding.get("priority_reasons", []), "path_tier": finding.get("path_tier"), "trace": finding.get("trace", [])}},
+            })
         summary = {
             "repo": audit_data["repo"],
             "commit": audit_data["commit"],
@@ -2891,6 +2975,12 @@ class ResearchOrchestrator:
             "external_submission": "disabled_manual_only",
             "ranked_candidates": len(ranked),
             "processed_candidates": len(results),
+            "execution_budget": max_candidates,
+            "eligible_candidates": len(selected) + len(deferred_supported),
+            "attempted_candidates": len(selected),
+            "deferred_supported_candidates": len(deferred_supported),
+            "automation_unavailable_candidates": len(unsupported),
+            "selection_strategy": "supported_language_and_vulnerability_class_round_robin",
             "results": results,
             "generated_at": datetime.now(timezone.utc).isoformat(),
         }

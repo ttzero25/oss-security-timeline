@@ -83,6 +83,12 @@ Python 3.11 이상이 필요합니다. 기본 CLI와 웹 화면에는 추가 Pyt
 python3 -m oss_timeline research-run https://github.com/owner/repo --max-candidates 3
 ```
 
+이미 생성된 `audit.json`을 재수집·재스캔 없이 최신 후보 선별 및 제한 PoC 엔진으로 다시 검증할 수도 있습니다.
+
+```sh
+python3 -m oss_timeline research-replay data/research/OWNER_REPO/COMMIT/audit.json --max-candidates 3
+```
+
 후보가 남으면 `poc-init`으로 `proof.py`, `manifest.json`, `claim.example.json`을 준비합니다. 조사한 커밋의 **실제 앱 경로**를 호출하도록 PoC를 완성하고, 정상 입력 대조군과 보안 영향을 명시한 `claim.json`을 작성하세요. `poc-verify`는 기본적으로 자원 제한 로컬 subprocess에서 두 입력을 실행합니다. 네트워크 차단과 읽기 전용 저장소 마운트가 필요하면 `--container`를 사용합니다. 재현 결과와 코드 인용이 같은 커밋에 맞고, 기존 공지 조사 근거가 채워지면 `disclosure`가 `GHSA_CANDIDATE.md`와 `CVE_REQUEST_BRIEF.md`를 만듭니다.
 
 ```sh

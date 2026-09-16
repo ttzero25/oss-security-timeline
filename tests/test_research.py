@@ -171,6 +171,16 @@ class ResearchTests(unittest.TestCase):
             self.assertEqual([step["role"] for step in linked[0].trace], ["source", "call", "sink"])
             self.assertEqual(coverage["go_multihop_files"], 2)
 
+    def test_c_scan_models_direct_argv_in_dangerous_sinks(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "main.c").write_text('''#include <stdio.h>\n#include <string.h>\nint main(int argc, char **argv) {\n  char target[8];\n  printf(argv[1]);\n  strcpy(target, argv[2]);\n  return 0;\n}\n''', encoding="utf-8")
+            findings, _ = SourceScanAgent().run(root, "fixture/c-direct-argv", "6" * 40)
+            kinds = {item.kind for item in findings}
+            self.assertIn("format_string", kinds)
+            self.assertIn("unsafe_copy", kinds)
+            self.assertTrue(all(item.entry_kind == "modeled_external_input" for item in findings))
+
     def test_go_scan_does_not_treat_argv_exec_as_shell(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -614,6 +624,51 @@ print(result.stdout)
             self.assertEqual(timeline["research_runs"][0]["status"], "draft_ready")
             self.assertTrue(any(item["kind"] == "research_verdict" for item in timeline["research_timeline"]))
             store.db.close()
+
+    def test_semantic_ranking_downranks_test_and_example_paths(self):
+        base = {"kind": "command_injection", "source_line": 1, "sink_line": 2, "function": "run", "trace": []}
+        ranked = SemanticAnalysisAgent().run([
+            {**base, "id": "test", "path": "tests/test_runner.py"},
+            {**base, "id": "example", "path": "examples/runner.py"},
+            {**base, "id": "production", "path": "src/runner.py"},
+        ])
+        self.assertEqual([item["id"] for item in ranked], ["production", "example", "test"])
+        self.assertEqual(ranked[0]["path_tier"], "production")
+        self.assertIn("테스트·fixture 경로 -22", next(item for item in ranked if item["id"] == "test")["priority_reasons"])
+
+    def test_orchestrator_unsupported_candidate_does_not_consume_execution_budget(self):
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)
+            repo = self._checkout(folder)
+            audit_file = audit(repo, "fixture/synthetic", folder / "research")
+            audit_data = json.loads(audit_file.read_text())
+            supported = audit_data["hypotheses"][0]
+            unsupported = {**supported, "id": "unsupported-high", "kind": "buffer_overflow", "path": "native/parser.c", "source_path": "native/parser.c", "sink_path": "native/parser.c"}
+            audit_data["hypotheses"] = [unsupported, supported]
+            audit_file.write_text(json.dumps(audit_data), encoding="utf-8")
+            result = json.loads(ResearchOrchestrator().run(audit_file, max_candidates=1).read_text())
+            self.assertEqual(result["attempted_candidates"], 1)
+            self.assertEqual(result["automation_unavailable_candidates"], 1)
+            self.assertEqual(result["results"][0]["finding_id"], supported["id"])
+            self.assertEqual(result["results"][1]["status"], "automation_unavailable")
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    def test_orchestrator_reproduces_bounded_typescript_candidate(self):
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)
+            repo = folder / "repo"
+            repo.mkdir()
+            (repo / "runner.ts").write_text('''import { execSync } from "node:child_process";\nexport default function run(command: string): Buffer {\n  return execSync(command);\n}\n''', encoding="utf-8")
+            subprocess.run(["git", "init", "-q", str(repo)], check=True)
+            subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+            subprocess.run(["git", "-C", str(repo), "-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "-qm", "fixture"], check=True)
+            audit_file = audit(repo, "fixture/typescript-runtime", folder / "research")
+            result = json.loads(ResearchOrchestrator().run(audit_file, max_candidates=1).read_text())
+            self.assertEqual(result["attempted_candidates"], 1)
+            self.assertEqual(result["results"][0]["stages"]["isolated_contrast"]["status"], "contrast_matched")
+            manifest = json.loads((audit_file.parent / result["results"][0]["finding_id"] / "manifest.json").read_text())
+            self.assertEqual(manifest["generator"], "bounded_typescript_v1")
+            self.assertEqual(manifest["typescript_policy"], "node_builtin_type_stripping")
 
     def test_orchestrator_stops_draft_for_possible_duplicate(self):
         with tempfile.TemporaryDirectory() as temp:

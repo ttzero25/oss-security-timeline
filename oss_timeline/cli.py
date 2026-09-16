@@ -88,6 +88,10 @@ def main(argv: list[str] | None = None) -> int:
     orchestrate.add_argument("--max-pages", type=int, default=100)
     orchestrate.add_argument("--max-manifests", type=int, default=100)
     orchestrate.add_argument("--container", action="store_true", help="PoC를 네트워크 차단·읽기 전용 Docker 컨테이너에서 실행")
+    replay = commands.add_parser("research-replay", help="기존 audit.json을 최신 선별·PoC 엔진으로 다시 실행")
+    replay.add_argument("audit_file", type=Path)
+    replay.add_argument("--max-candidates", type=int, default=3)
+    replay.add_argument("--container", action="store_true", help="PoC를 네트워크 차단·읽기 전용 Docker 컨테이너에서 실행")
     poc_init = commands.add_parser("poc-init", help="후보용 정상/공격 대조군 PoC 준비")
     poc_init.add_argument("audit_file", type=Path)
     poc_init.add_argument("finding_id")
@@ -115,7 +119,7 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("수집 간격은 1분 이상이어야 합니다")
     if args.command in {"audit", "research-run"} and args.max_files < 1:
         parser.error("파일 조사 상한은 1 이상이어야 합니다")
-    if args.command == "research-run" and args.max_candidates < 1:
+    if args.command in {"research-run", "research-replay"} and args.max_candidates < 1:
         parser.error("후보 처리 상한은 1 이상이어야 합니다")
     if args.command == "research-run" and (args.max_pages < 1 or args.max_manifests < 1):
         parser.error("페이지 및 매니페스트 제한은 1 이상이어야 합니다")
@@ -139,7 +143,7 @@ def main(argv: list[str] | None = None) -> int:
         except (OSError, ValueError, RuntimeError, KeyError, TypeError, json.JSONDecodeError) as exc:
             print(str(exc), file=sys.stderr)
             return 1
-    if args.command in {"audit", "research-run", "poc-init", "poc-verify", "disclosure", "report-status", "report-mark"}:
+    if args.command in {"audit", "research-run", "research-replay", "poc-init", "poc-verify", "disclosure", "report-status", "report-mark"}:
         try:
             if args.command in {"audit", "research-run"}:
                 target_path = Path(args.target)
@@ -164,6 +168,10 @@ def main(argv: list[str] | None = None) -> int:
                     response["orchestration_file"] = str(orchestration)
                     response["orchestration"] = json.loads(orchestration.read_text(encoding="utf-8"))
                 print(json.dumps(response, ensure_ascii=False))
+            elif args.command == "research-replay":
+                orchestration = ResearchOrchestrator().run(args.audit_file, args.max_candidates, container=args.container, timeline_db=args.db)
+                result = json.loads(orchestration.read_text(encoding="utf-8"))
+                print(json.dumps({"audit_file": str(args.audit_file), "orchestration_file": str(orchestration), "orchestration": result}, ensure_ascii=False))
             elif args.command == "poc-init":
                 print(prepare_poc(args.audit_file, args.finding_id))
             elif args.command == "poc-verify":
