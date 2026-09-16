@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 
 from oss_timeline.core import Collection, Store
-from oss_timeline.research import DisclosureAgent, PocValidatorAgent, RepositoryProfilerAgent, ResearchOrchestrator, SourceScanAgent, audit, claim_template, prepare_poc
+from oss_timeline.research import BuildEnvironmentAgent, DisclosureAgent, LimitedPocAgent, PocValidatorAgent, RepositoryProfilerAgent, ResearchOrchestrator, SemanticAnalysisAgent, SourceScanAgent, audit, claim_template, prepare_poc
 
 
 FIXTURE = Path(__file__).parent / "fixtures" / "synthetic_app.py"
@@ -205,6 +205,49 @@ print(result.stdout)
             (poc_dir / "proof.py").write_text(proof + "\n# changed after verification\n")
             with self.assertRaisesRegex(ValueError, "변경"):
                 DisclosureAgent().run(audit_file, finding["id"], claim_file, evidence_file)
+
+    def test_javascript_limited_poc_runs_real_default_export_with_contrast(self):
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)
+            repo = folder / "repo"
+            repo.mkdir()
+            (repo / "tool.mjs").write_text('''import { execSync } from "node:child_process";\n\nexport default function run(command) {\n  return execSync(command);\n}\n''', encoding="utf-8")
+            subprocess.run(["git", "init", "-q", str(repo)], check=True)
+            subprocess.run(["git", "-C", str(repo), "add", "tool.mjs"], check=True)
+            subprocess.run(["git", "-C", str(repo), "-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "-qm", "fixture"], check=True)
+            audit_file = audit(repo, "fixture/javascript-poc", folder / "research")
+            audit_data = json.loads(audit_file.read_text())
+            ranked = SemanticAnalysisAgent().run(audit_data["hypotheses"], audit_data["profile"])
+            finding = next(item for item in ranked if item["kind"] == "command_injection")
+            self.assertTrue(finding["auto_reproduction_supported"])
+            environment = BuildEnvironmentAgent().run(repo, finding)
+            self.assertEqual(environment["runtime"], "javascript")
+            manifest_file = LimitedPocAgent().run(audit_file, finding, environment)
+            evidence = json.loads(PocValidatorAgent().run(manifest_file).read_text())
+            self.assertEqual(evidence["mechanical_result"], "contrast_matched")
+            self.assertEqual(evidence["proof_file"], "proof.mjs")
+            self.assertFalse(evidence["control_observable"])
+
+    def test_go_limited_poc_runs_single_file_handler_with_contrast(self):
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)
+            repo = folder / "repo"
+            repo.mkdir()
+            (repo / "handler.go").write_text('''package fixture\n\nimport (\n    "net/http"\n    "os/exec"\n)\n\nfunc handler(w http.ResponseWriter, r *http.Request) {\n    command := r.FormValue("command")\n    exec.Command("sh", "-c", command).Run()\n}\n''', encoding="utf-8")
+            subprocess.run(["git", "init", "-q", str(repo)], check=True)
+            subprocess.run(["git", "-C", str(repo), "add", "handler.go"], check=True)
+            subprocess.run(["git", "-C", str(repo), "-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "-qm", "fixture"], check=True)
+            audit_file = audit(repo, "fixture/go-poc", folder / "research")
+            audit_data = json.loads(audit_file.read_text())
+            ranked = SemanticAnalysisAgent().run(audit_data["hypotheses"], audit_data["profile"])
+            finding = next(item for item in ranked if item["kind"] == "command_injection")
+            self.assertTrue(finding["auto_reproduction_supported"])
+            environment = BuildEnvironmentAgent().run(repo, finding)
+            self.assertEqual(environment["runtime"], "go")
+            manifest_file = LimitedPocAgent().run(audit_file, finding, environment)
+            evidence = json.loads(PocValidatorAgent().run(manifest_file).read_text())
+            self.assertEqual(evidence["mechanical_result"], "contrast_matched")
+            self.assertFalse(evidence["control_observable"])
 
     def test_audit_includes_saved_public_advisories_as_context(self):
         with tempfile.TemporaryDirectory() as temp:

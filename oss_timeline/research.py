@@ -7,6 +7,7 @@ import os
 import posixpath
 import re
 import secrets
+import shutil
 import signal
 import sqlite3
 import subprocess
@@ -1119,7 +1120,10 @@ class SemanticAnalysisAgent:
         output = []
         for finding in hypotheses:
             suffix = Path(finding.get("path", "")).suffix
-            supported = suffix == ".py" and finding.get("kind") in {"command_injection", "code_execution"}
+            python_supported = suffix == ".py" and finding.get("kind") in {"command_injection", "code_execution"}
+            javascript_supported = suffix in {".js", ".mjs", ".cjs"} and finding.get("kind") in {"command_injection", "code_execution"} and (finding.get("source_path") or finding.get("path")) == (finding.get("sink_path") or finding.get("path"))
+            go_supported = suffix == ".go" and finding.get("kind") == "command_injection" and (finding.get("source_path") or finding.get("path")) == (finding.get("sink_path") or finding.get("path"))
+            supported = python_supported or javascript_supported or go_supported
             score = self.SCORES.get(finding.get("kind"), 40)
             reasons = [f"{finding.get('kind')} 기본 위험도 {score}"]
             if finding.get("function") and finding["function"] != "javascript_scope_unknown":
@@ -1133,7 +1137,8 @@ class SemanticAnalysisAgent:
             if len(finding.get("trace", [])) >= 3:
                 score += 3
                 reasons.append("호출 경로 근거 +3")
-            output.append({**finding, "priority": min(score, 100), "priority_reasons": reasons, "auto_reproduction_supported": supported, "automation_reason": "제한된 Python 실제 함수 호출 템플릿 지원" if supported else "이 언어·취약점 유형의 안전한 자동 PoC 템플릿이 없음"})
+            runtime = "Python" if python_supported else "JavaScript" if javascript_supported else "Go" if go_supported else ""
+            output.append({**finding, "priority": min(score, 100), "priority_reasons": reasons, "auto_reproduction_supported": supported, "automation_reason": f"제한된 {runtime} 실제 함수 호출 템플릿 지원" if supported else "이 언어·취약점 유형의 안전한 자동 PoC 템플릿이 없음"})
         return sorted(output, key=lambda item: (-item["priority"], item.get("path", ""), item.get("sink_line", 0)))
 
 
@@ -1179,14 +1184,27 @@ class EvidenceGateAgent:
 class BuildEnvironmentAgent:
     """Resolve a pinned local runtime without installing target dependencies."""
     def run(self, checkout_root: Path, finding: dict) -> dict:
-        if Path(finding["path"]).suffix != ".py":
-            return {"status": "unsupported", "reason": "현재 자동 빌드 환경은 Python 후보만 지원합니다"}
-        manifests = [name for name in ("pyproject.toml", "setup.py", "setup.cfg", "requirements.txt") if (checkout_root / name).is_file()]
-        return {"status": "ready", "runtime": "python", "image": "python:3.11-slim", "manifests": manifests, "default_execution": "limited_process", "dependency_install": "disabled"}
+        suffix = Path(finding["path"]).suffix
+        if suffix == ".py":
+            manifests = [name for name in ("pyproject.toml", "setup.py", "setup.cfg", "requirements.txt") if (checkout_root / name).is_file()]
+            return {"status": "ready", "runtime": "python", "executable": sys.executable, "image": "python:3.11-slim", "manifests": manifests, "default_execution": "limited_process", "dependency_install": "disabled"}
+        if suffix in {".js", ".mjs", ".cjs"}:
+            executable = shutil.which("node")
+            if not executable:
+                return {"status": "unsupported", "reason": "로컬 Node.js 런타임을 찾지 못했습니다"}
+            manifests = [name for name in ("package.json", "package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml") if (checkout_root / name).is_file()]
+            return {"status": "ready", "runtime": "javascript", "executable": executable, "image": "node:22-slim", "manifests": manifests, "default_execution": "limited_process", "dependency_install": "disabled"}
+        if suffix == ".go":
+            executable = shutil.which("go")
+            if not executable:
+                return {"status": "unsupported", "reason": "로컬 Go 런타임을 찾지 못했습니다"}
+            manifests = [name for name in ("go.mod", "go.sum") if (checkout_root / name).is_file()]
+            return {"status": "ready", "runtime": "go", "executable": executable, "image": "golang:1.26-alpine", "manifests": manifests, "default_execution": "limited_process", "dependency_install": "disabled"}
+        return {"status": "unsupported", "reason": "현재 자동 빌드 환경은 제한된 Python·JavaScript 후보만 지원합니다"}
 
 
 class LimitedPocAgent:
-    """Generate harmless marker-based reproductions for a small allowlist of Python sinks."""
+    """Generate harmless marker-based reproductions for a small runtime allowlist."""
     def run(self, audit_file: Path, finding: dict, environment: dict) -> Path:
         audit_data, current = load_hypothesis(audit_file, finding["id"])
         if current["path"] != finding["path"] or not finding.get("auto_reproduction_supported"):
@@ -1195,6 +1213,129 @@ class LimitedPocAgent:
         source_file = (checkout_root / finding["path"]).resolve()
         if not source_file.is_relative_to(checkout_root) or not source_file.is_file():
             raise ValueError("PoC 대상 파일이 조사 체크아웃 안에 없습니다")
+        destination = audit_file.parent / finding["id"]
+        destination.mkdir(parents=True, exist_ok=True)
+        manifest_path = destination / "manifest.json"
+        if manifest_path.exists():
+            raise ValueError("기존 PoC 작업물이 있어 자동 생성으로 덮어쓰지 않습니다")
+        marker = "OSS_PROOF_" + secrets.token_hex(8)
+        kind = finding["kind"]
+        if environment.get("runtime") == "go":
+            try:
+                source_text = source_file.read_text(encoding="utf-8")
+            except (OSError, UnicodeError) as exc:
+                raise ValueError("PoC 대상 Go 파일을 읽을 수 없습니다") from exc
+            blocks = _go_function_blocks(source_text.splitlines())
+            target = [block for block in blocks if block["name"] == finding["function"]]
+            import_sections = re.findall(r"\bimport\s*(?:\((.*?)\)|\"([^\"]+)\")", source_text, re.S)
+            imports = []
+            for grouped, single in import_sections:
+                imports.extend(re.findall(r'"([^"]+)"', grouped) if grouped else [single])
+            signature = re.search(rf"\bfunc\s+{re.escape(finding['function'])}\s*\([^)]*\*http\.Request[^)]*\)", source_text, re.S)
+            form_key = re.search(r'\br\.(?:FormValue|PostFormValue)\s*\(\s*"([^"]+)"', source_text)
+            if len(blocks) != 1 or len(target) != 1 or not signature or not form_key or any("." in value.split("/", 1)[0] for value in imports):
+                raise ValueError("자동 Go PoC는 표준 라이브러리만 쓰는 단일 함수 HTTP 핸들러로 제한됩니다")
+            package_match = re.search(r"(?m)^\s*package\s+([A-Za-z_]\w*)", source_text)
+            if not package_match:
+                raise ValueError("Go 패키지 이름을 확인할 수 없습니다")
+            proof = destination / "proof.py"
+            if proof.exists():
+                raise ValueError("기존 PoC 작업물이 있어 자동 생성으로 덮어쓰지 않습니다")
+            go_test = f'''package {package_match.group(1)}
+
+import (
+    "fmt"
+    "net/http/httptest"
+    "net/url"
+    "os"
+    "strconv"
+    "strings"
+    "testing"
+)
+
+func TestOSSSecurityTimelineContrast(t *testing.T) {{
+    markerPath := os.Getenv("OSS_POC_SCRATCH") + "/go-marker"
+    payload := "printf OSS_BENIGN_CONTROL"
+    if os.Args[len(os.Args)-1] == "attack" {{
+        payload = "printf {marker} > " + strconv.Quote(markerPath)
+    }}
+    values := url.Values{{{json.dumps(form_key.group(1))}: []string{{payload}}}}
+    request := httptest.NewRequest("POST", "/", strings.NewReader(values.Encode()))
+    request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+    {finding["function"]}(httptest.NewRecorder(), request)
+    if data, err := os.ReadFile(markerPath); err == nil {{
+        fmt.Println(string(data))
+    }}
+}}
+'''
+            source_sha = hashlib.sha256(source_text.encode()).hexdigest()
+            script = f'''import hashlib
+import os
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+repo = Path(os.environ["OSS_POC_REPO"])
+scratch = Path(os.environ["OSS_POC_SCRATCH"])
+source = repo / {finding["path"]!r}
+if hashlib.sha256(source.read_bytes()).hexdigest() != {source_sha!r}:
+    raise SystemExit("target source changed")
+shutil.copy2(source, scratch / source.name)
+(scratch / "oss_security_poc_test.go").write_text({go_test!r}, encoding="utf-8")
+go_cache = scratch / "go-cache"
+go_tmp = scratch / "go-tmp"
+go_cache.mkdir()
+go_tmp.mkdir()
+env = {{"PATH": os.environ.get("PATH", ""), "OSS_POC_SCRATCH": str(scratch), "GOCACHE": str(go_cache), "GOTMPDIR": str(go_tmp), "GOPROXY": "off", "GOSUMDB": "off", "GO111MODULE": "off"}}
+result = subprocess.run(["go", "test", "-v", "-run", "^TestOSSSecurityTimelineContrast$", "-count=1", "-args", sys.argv[1]], cwd=scratch, env=env, capture_output=True, text=True, timeout=20)
+print(result.stdout, end="")
+print(result.stderr, end="", file=sys.stderr)
+raise SystemExit(result.returncode)
+'''
+            manifest = {"finding_id": finding["id"], "repo_path": audit_data["checkout"], "commit": audit_data["commit"], "image": environment["image"], "proof_file": "proof.py", "attack": ["python3", "proof.py", "attack"], "control": ["python3", "proof.py", "control"], "observable": {"type": "stdout_contains", "value": marker}, "timeout_seconds": 30, "generator": "bounded_go_v1", "target_source_sha256": source_sha}
+            proof.write_text(script, encoding="utf-8")
+            manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+            return manifest_path
+        if environment.get("runtime") == "javascript":
+            try:
+                source_text = source_file.read_text(encoding="utf-8")
+            except (OSError, UnicodeError) as exc:
+                raise ValueError("PoC 대상 JavaScript 파일을 읽을 수 없습니다") from exc
+            blocks = [block for block in _js_function_blocks(source_text.splitlines()) if block["name"] == finding["function"]]
+            imports = re.findall(r"\bfrom\s*['\"]([^'\"]+)['\"]|\brequire\s*\(\s*['\"]([^'\"]+)['\"]", source_text)
+            specifiers = [left or right for left, right in imports]
+            allowed_builtins = {"child_process", "url", "path", "util", "buffer"}
+            if len(blocks) != 1 or not re.search(rf"\bexport\s+default\b[\s\S]{{0,80}}\bfunction\s+{re.escape(finding['function'])}\b", source_text) or any(not value.startswith("node:") and value not in allowed_builtins for value in specifiers):
+                raise ValueError("자동 JavaScript PoC는 Node 내장 모듈만 사용하는 단일 default export 함수로 제한됩니다")
+            block = blocks[0]
+            outside = source_text.splitlines()
+            outside = outside[:block["start"]] + outside[block["end"] + 1:]
+            if any(line.strip() and not line.lstrip().startswith(("import ", "//")) for line in outside):
+                raise ValueError("자동 JavaScript PoC는 import 외 최상위 실행문이 없는 모듈만 호출합니다")
+            proof = destination / "proof.mjs"
+            if proof.exists():
+                raise ValueError("기존 PoC 작업물이 있어 자동 생성으로 덮어쓰지 않습니다")
+            attack_value = f"printf {marker}" if kind == "command_injection" else f'console.log("{marker}")'
+            source_header = "\n".join(source_text.splitlines()[block["start"] : min(block["end"] + 1, block["start"] + 8)])
+            use_proxy = "({" in source_header or bool(JS_SOURCE.search(finding.get("source_code", "")))
+            script = f'''import {{ pathToFileURL }} from "node:url";
+
+const repo = process.env.OSS_POC_REPO;
+const targetUrl = pathToFileURL(`${{repo}}/{finding["path"]}`).href;
+const module = await import(targetUrl);
+const target = module.default;
+const value = process.argv[2] === "attack" ? {attack_value!r} : "printf OSS_BENIGN_CONTROL";
+let proxy;
+proxy = new Proxy({{}}, {{ get: (_target, key) => key === Symbol.toPrimitive || key === "toString" ? () => value : proxy }});
+const argument = {"proxy" if use_proxy else "value"};
+const result = await target(...Array(Math.max(target.length, 1)).fill(argument));
+if (result !== undefined) console.log(Buffer.isBuffer(result) ? result.toString() : String(result));
+'''
+            manifest = {"finding_id": finding["id"], "repo_path": audit_data["checkout"], "commit": audit_data["commit"], "image": environment["image"], "proof_file": "proof.mjs", "attack": ["node", "proof.mjs", "attack"], "control": ["node", "proof.mjs", "control"], "observable": {"type": "stdout_contains", "value": marker}, "timeout_seconds": 30, "generator": "bounded_javascript_v1"}
+            proof.write_text(script, encoding="utf-8")
+            manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+            return manifest_path
         try:
             syntax = ast.parse(source_file.read_text(encoding="utf-8"))
         except (OSError, UnicodeError, SyntaxError) as exc:
@@ -1202,14 +1343,9 @@ class LimitedPocAgent:
         top_level = [node for node in syntax.body if isinstance(node, ast.FunctionDef) and node.name == finding["function"]]
         if len(top_level) != 1:
             raise ValueError("자동 PoC는 모듈 최상위 동기 함수만 호출합니다")
-        destination = audit_file.parent / finding["id"]
-        destination.mkdir(parents=True, exist_ok=True)
         proof = destination / "proof.py"
-        manifest_path = destination / "manifest.json"
-        if proof.exists() or manifest_path.exists():
+        if proof.exists():
             raise ValueError("기존 PoC 작업물이 있어 자동 생성으로 덮어쓰지 않습니다")
-        marker = "OSS_PROOF_" + secrets.token_hex(8)
-        kind = finding["kind"]
         if kind == "command_injection":
             attack_expression = '"printf " + MARKER'
             control_expression = '"printf OSS_BENIGN_CONTROL"'
@@ -1258,7 +1394,7 @@ def drive(case):
 if __name__ == "__main__":
     drive(sys.argv[1])
 '''
-        manifest = {"finding_id": finding["id"], "repo_path": audit_data["checkout"], "commit": audit_data["commit"], "image": environment["image"], "attack": ["python3", "proof.py", "attack"], "control": ["python3", "proof.py", "control"], "observable": {"type": "stdout_contains", "value": marker}, "timeout_seconds": 30, "generator": "bounded_python_v1"}
+        manifest = {"finding_id": finding["id"], "repo_path": audit_data["checkout"], "commit": audit_data["commit"], "image": environment["image"], "proof_file": "proof.py", "attack": ["python3", "proof.py", "attack"], "control": ["python3", "proof.py", "control"], "observable": {"type": "stdout_contains", "value": marker}, "timeout_seconds": 30, "generator": "bounded_python_v1"}
         proof.write_text(script, encoding="utf-8")
         manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
         return manifest_path
@@ -1408,7 +1544,11 @@ class PocValidatorAgent:
         marker = manifest.get("observable", {}).get("value")
         if not marker or not isinstance(marker, str) or len(marker) > 100:
             raise ValueError("명확한 관측 마커가 필요합니다")
-        if not (poc_dir / "proof.py").is_file() or "TODO" in (poc_dir / "proof.py").read_text(encoding="utf-8"):
+        proof_name = manifest.get("proof_file", "proof.py")
+        if not isinstance(proof_name, str) or not re.fullmatch(r"proof\.(?:py|mjs)", proof_name):
+            raise ValueError("PoC 증명 파일 이름이 허용 범위를 벗어났습니다")
+        proof_file = poc_dir / proof_name
+        if not proof_file.is_file() or "TODO" in proof_file.read_text(encoding="utf-8"):
             raise ValueError("PoC의 실제 호출·대조군 TODO를 완성해야 합니다")
         with tempfile.TemporaryDirectory(prefix="oss-poc-") as temporary:
             control_scratch = Path(temporary) / "control"
@@ -1420,7 +1560,7 @@ class PocValidatorAgent:
         control_match = marker in control["stdout"]
         attack_match = marker in attack["stdout"]
         confirmed = attack_match and not control_match and attack["returncode"] == 0 and control["returncode"] == 0 and not attack["timed_out"] and not control["timed_out"]
-        evidence = {"finding_id": manifest["finding_id"], "repo_path": str(repo), "commit": manifest["commit"], "proof_sha256": hashlib.sha256((poc_dir / "proof.py").read_bytes()).hexdigest(), "manifest_sha256": hashlib.sha256(manifest_file.read_bytes()).hexdigest(), "mode": "offline_container" if container else "limited_process", "control": control, "attack": attack, "control_observable": control_match, "attack_observable": attack_match, "mechanical_result": "contrast_matched" if confirmed else "not_confirmed", "validated_at": datetime.now(timezone.utc).isoformat(), "note": "기계적 관측 결과입니다. 로컬 제한 프로세스는 컨테이너 수준의 파일·네트워크 격리를 제공하지 않으며 코드 경로와 보안 영향은 별도로 검토해야 합니다."}
+        evidence = {"finding_id": manifest["finding_id"], "repo_path": str(repo), "commit": manifest["commit"], "proof_file": proof_name, "proof_sha256": hashlib.sha256(proof_file.read_bytes()).hexdigest(), "manifest_sha256": hashlib.sha256(manifest_file.read_bytes()).hexdigest(), "mode": "offline_container" if container else "limited_process", "control": control, "attack": attack, "control_observable": control_match, "attack_observable": attack_match, "mechanical_result": "contrast_matched" if confirmed else "not_confirmed", "validated_at": datetime.now(timezone.utc).isoformat(), "note": "기계적 관측 결과입니다. 로컬 제한 프로세스는 컨테이너 수준의 파일·네트워크 격리를 제공하지 않으며 코드 경로와 보안 영향은 별도로 검토해야 합니다."}
         output = poc_dir / "evidence.json"
         output.write_text(json.dumps(evidence, ensure_ascii=False, indent=2), encoding="utf-8")
         return output
@@ -1459,7 +1599,9 @@ class DisclosureAgent:
         if commit_hash(checkout_path) != audit_data["commit"]:
             raise ValueError("조사한 커밋이 변경됐습니다")
         poc_dir = claim_file.parent
-        if evidence.get("proof_sha256") != hashlib.sha256((poc_dir / "proof.py").read_bytes()).hexdigest() or evidence.get("manifest_sha256") != hashlib.sha256((poc_dir / "manifest.json").read_bytes()).hexdigest():
+        proof_name = evidence.get("proof_file", "proof.py")
+        proof_file = poc_dir / proof_name
+        if not proof_file.is_file() or evidence.get("proof_sha256") != hashlib.sha256(proof_file.read_bytes()).hexdigest() or evidence.get("manifest_sha256") != hashlib.sha256((poc_dir / "manifest.json").read_bytes()).hexdigest():
             raise ValueError("PoC 검증 이후 작업물 파일이 변경됐습니다")
         for field, expected_line, expected_path in (("source", finding["source_line"], finding.get("source_path") or finding["path"]), ("sink", finding["sink_line"], finding.get("sink_path") or finding["path"])):
             citation = claim[field]
@@ -1514,7 +1656,7 @@ Overall verdict: **{gate.get("verdict", "manual review required")}**
 
 ## Proof of concept
 
-The normal/attack PoC contrast matched against the checkout at `{audit_data["commit"]}`. PoC files: `{claim_file.parent / "proof.py"}` and `{claim_file.parent / "manifest.json"}`. Run `python3 -m oss_timeline poc-verify {claim_file.parent / "manifest.json"}` with the limited local runner, or add `--container` for stronger isolation.
+The normal/attack PoC contrast matched against the checkout at `{audit_data["commit"]}`. PoC files: `{proof_file}` and `{claim_file.parent / "manifest.json"}`. Run `python3 -m oss_timeline poc-verify {claim_file.parent / "manifest.json"}` with the limited local runner, or add `--container` for stronger isolation.
 
 {steps}
 
@@ -1552,7 +1694,7 @@ Weakness: {claim["cwe"]}
 
 Impact: {claim["impact"]}
 
-Root cause and reproducibility: {claim["root_cause"]} See `GHSA_CANDIDATE.md`, `proof.py`, `manifest.json`, and `evidence.json` for the full private report and local reproduction.
+Root cause and reproducibility: {claim["root_cause"]} See `GHSA_CANDIDATE.md`, `{proof_name}`, `manifest.json`, and `evidence.json` for the full private report and local reproduction.
 
 CVE ID: not assigned. Coordinate the request with the repository maintainer or an in-scope CNA after private triage.
 '''
@@ -1660,7 +1802,8 @@ class ResearchOrchestrator:
                 manifest_file = destination / "manifest.json"
                 if manifest_file.is_file():
                     existing_manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
-                    reusable = existing_manifest.get("generator") == "bounded_python_v1" and existing_manifest.get("finding_id") == finding["id"] and existing_manifest.get("commit") == audit_data["commit"] and (destination / "proof.py").is_file()
+                    proof_name = existing_manifest.get("proof_file", "proof.py")
+                    reusable = existing_manifest.get("generator") in {"bounded_python_v1", "bounded_javascript_v1", "bounded_go_v1"} and existing_manifest.get("finding_id") == finding["id"] and existing_manifest.get("commit") == audit_data["commit"] and (destination / proof_name).is_file()
                     if not reusable:
                         raise ValueError("기존 수동 PoC 작업물이 있어 자동 생성으로 덮어쓰지 않습니다")
                     generation_status = "reused"
