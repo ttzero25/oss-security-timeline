@@ -458,6 +458,26 @@ print(result.stdout)
             with self.assertRaisesRegex(ValueError, "SSRF PoC"):
                 LimitedPocAgent().run(audit_file, finding, BuildEnvironmentAgent().run(repo, finding))
 
+    def test_python_sql_poc_stubs_database_and_runs_query_builder(self):
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)
+            repo = folder / "repo"
+            repo.mkdir()
+            (repo / "query.py").write_text('''def search(cursor, query):\n    return cursor.execute("SELECT * FROM users WHERE name = '" + query + "'")\n''', encoding="utf-8")
+            subprocess.run(["git", "init", "-q", str(repo)], check=True)
+            subprocess.run(["git", "-C", str(repo), "add", "query.py"], check=True)
+            subprocess.run(["git", "-C", str(repo), "-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "-qm", "fixture"], check=True)
+            audit_file = audit(repo, "fixture/python-sql-poc", folder / "research")
+            audit_data = json.loads(audit_file.read_text())
+            finding = next(item for item in SemanticAnalysisAgent().run(audit_data["hypotheses"], audit_data["profile"]) if item["kind"] == "sql_injection")
+            self.assertTrue(finding["auto_reproduction_supported"])
+            manifest_file = LimitedPocAgent().run(audit_file, finding, BuildEnvironmentAgent().run(repo, finding))
+            manifest = json.loads(manifest_file.read_text())
+            self.assertEqual(manifest["database_policy"], "stubbed_no_real_connection")
+            evidence = json.loads(PocValidatorAgent().run(manifest_file).read_text())
+            self.assertEqual(evidence["mechanical_result"], "contrast_matched")
+            self.assertFalse(evidence["control_observable"])
+
     def test_go_limited_poc_runs_single_file_handler_with_contrast(self):
         with tempfile.TemporaryDirectory() as temp:
             folder = Path(temp)
