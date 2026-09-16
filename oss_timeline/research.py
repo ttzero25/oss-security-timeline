@@ -407,6 +407,81 @@ def _python_authorization_hypotheses(filename: Path, root: Path, repo: str, comm
     return output
 
 
+def _python_concurrency_hypotheses(filename: Path, root: Path, repo: str, commit: str) -> list[Hypothesis]:
+    """Find security-state check/act windows on module-level mutable containers."""
+    try:
+        text = filename.read_text(encoding="utf-8")
+        tree = _python_parse(text)
+    except (OSError, UnicodeError, SyntaxError):
+        return []
+    lines = text.splitlines()
+    path = filename.relative_to(root).as_posix()
+    security_terms = ("attempt", "quota", "limit", "balance", "credit", "nonce", "token", "replay", "session")
+    mutable_calls = {"dict", "list", "set", "collections.defaultdict", "collections.counter", "defaultdict", "counter"}
+    shared = set()
+    for node in tree.body:
+        if not isinstance(node, (ast.Assign, ast.AnnAssign)) or node.value is None:
+            continue
+        targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+        value_is_mutable = isinstance(node.value, (ast.Dict, ast.List, ast.Set)) or isinstance(node.value, ast.Call) and _qualified(node.value.func).lower() in mutable_calls
+        if value_is_mutable:
+            shared.update(target.id for target in targets if isinstance(target, ast.Name) and any(term in target.id.lower() for term in security_terms))
+    if not shared:
+        return []
+
+    output = []
+    mutating_methods = {"add", "append", "clear", "discard", "extend", "pop", "remove", "update"}
+    for function in (node for node in ast.walk(tree) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))):
+        decorators = [_decorator_name(item) for item in function.decorator_list]
+        route = any(name.rsplit(".", 1)[-1] in {"route", "get", "post", "put", "patch", "delete"} for name in decorators)
+        concurrent_entry = route or isinstance(function, ast.AsyncFunctionDef)
+        if not concurrent_entry:
+            continue
+        has_lock = any(
+            isinstance(node, (ast.With, ast.AsyncWith)) and any(any(term in ast.unparse(item.context_expr).lower() for term in ("lock", "mutex", "semaphore")) for item in node.items)
+            or isinstance(node, ast.Call) and _qualified(node.func).lower().endswith((".acquire", ".acquire_nowait"))
+            for node in ast.walk(function)
+        )
+        if has_lock:
+            continue
+
+        checks = []
+        mutations = []
+        for node in ast.walk(function):
+            if isinstance(node, ast.If):
+                names = {name for name in shared if name in _name_refs(node.test)}
+                for name in names:
+                    checks.append((name, node.lineno, lines[node.lineno - 1]))
+            if isinstance(node, ast.AugAssign) and isinstance(node.target, ast.Subscript) and isinstance(node.target.value, ast.Name) and node.target.value.id in shared:
+                mutations.append((node.target.value.id, node.lineno, lines[node.lineno - 1]))
+            elif isinstance(node, (ast.Assign, ast.AnnAssign)):
+                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                for target in targets:
+                    if isinstance(target, ast.Subscript) and isinstance(target.value, ast.Name) and target.value.id in shared:
+                        mutations.append((target.value.id, node.lineno, lines[node.lineno - 1]))
+            elif isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name) and node.func.value.id in shared and node.func.attr in mutating_methods:
+                mutations.append((node.func.value.id, node.lineno, lines[node.lineno - 1]))
+
+        source_line = function.lineno
+        source_code = lines[source_line - 1]
+        for node in sorted(ast.walk(function), key=lambda item: getattr(item, "lineno", 0)):
+            if isinstance(node, (ast.Assign, ast.AnnAssign)) and node.value is not None and _request_source(node.value):
+                source_line, source_code = node.lineno, lines[node.lineno - 1]
+                break
+        for name, check_line, check_code in checks:
+            mutation = next((item for item in sorted(mutations, key=lambda item: item[1]) if item[0] == name and item[1] > check_line), None)
+            if not mutation:
+                continue
+            _, mutation_line, mutation_code = mutation
+            trace = [
+                {"role": "source", "path": path, "line": source_line, "function": function.name, "code": source_code.strip()[:240]},
+                {"role": "shared_state_check", "path": path, "line": check_line, "function": function.name, "code": check_code.strip()[:240]},
+                {"role": "unsynchronized_mutation", "path": path, "line": mutation_line, "function": function.name, "code": mutation_code.strip()[:240]},
+            ]
+            output.append(_hypothesis(repo, commit, "concurrency_race_candidate", path, source_line, mutation_line, source_code, mutation_code, function.name, entry_kind="http_route" if route else "modeled_public_api", trace=trace))
+    return output
+
+
 def _hypothesis(repo: str, commit: str, kind: str, path: str, source_line: int, sink_line: int, source_code: str, sink_code: str, function: str, *, source_path: str | None = None, sink_path: str | None = None, entry_kind: str = "modeled_external_input", trace: list[dict] | None = None) -> Hypothesis:
     source_path = source_path or path
     sink_path = sink_path or path
@@ -1342,6 +1417,7 @@ class SourceScanAgent:
                 output.extend(_python_interprocedural_hypotheses(filename, root, repo, commit))
                 output.extend(_python_toctou_hypotheses(filename, root, repo, commit))
                 output.extend(_python_authorization_hypotheses(filename, root, repo, commit))
+                output.extend(_python_concurrency_hypotheses(filename, root, repo, commit))
             elif filename.suffix in C_EXTENSIONS:
                 output.extend(_c_hypotheses(filename, root, repo, commit))
             elif filename.suffix == ".go":
@@ -1361,7 +1437,7 @@ class SourceScanAgent:
 
 class SemanticAnalysisAgent:
     """Prioritize hypotheses and allow automatic reproduction only for bounded safe templates."""
-    SCORES = {"command_injection": 90, "workflow_injection": 88, "authentication_bypass": 85, "code_execution": 85, "privilege_assignment": 84, "authorization_scope_candidate": 82, "template_injection": 80, "sql_injection": 75, "unsafe_deserialization": 70, "toctou_candidate": 68, "path_traversal": 65, "possible_ssrf": 60, "format_string": 55, "unsafe_copy": 50}
+    SCORES = {"command_injection": 90, "workflow_injection": 88, "authentication_bypass": 85, "code_execution": 85, "privilege_assignment": 84, "authorization_scope_candidate": 82, "template_injection": 80, "sql_injection": 75, "concurrency_race_candidate": 72, "unsafe_deserialization": 70, "toctou_candidate": 68, "path_traversal": 65, "possible_ssrf": 60, "format_string": 55, "unsafe_copy": 50}
 
     def run(self, hypotheses: list[dict], profile: dict | None = None) -> list[dict]:
         changed = (profile or {}).get("recent_changes", {}).get("files", {})
@@ -1406,7 +1482,7 @@ class ReachabilityGateAgent:
 
 class EvidenceGateAgent:
     """Apply explicit evidence gates before a private draft can be generated."""
-    HIGH_IMPACT = {"command_injection", "workflow_injection", "authentication_bypass", "privilege_assignment", "authorization_scope_candidate", "code_execution", "template_injection", "sql_injection", "unsafe_deserialization", "unsafe_copy", "format_string"}
+    HIGH_IMPACT = {"command_injection", "workflow_injection", "authentication_bypass", "privilege_assignment", "authorization_scope_candidate", "concurrency_race_candidate", "code_execution", "template_injection", "sql_injection", "unsafe_deserialization", "unsafe_copy", "format_string"}
 
     def run(self, audit_data: dict, finding: dict, reachability: dict, evidence: dict, duplicate_review: dict) -> dict:
         trace = finding.get("trace") or []
@@ -2057,10 +2133,11 @@ class DuplicateReviewAgent:
         "authentication_bypass": {"authentication bypass", "signature verification", "CWE-347"},
         "privilege_assignment": {"privilege assignment", "role assignment", "privilege escalation", "CWE-266"},
         "authorization_scope_candidate": {"authorization bypass", "IDOR", "BOLA", "user-controlled key", "CWE-639"},
+        "concurrency_race_candidate": {"race condition", "improper synchronization", "concurrent execution", "CWE-362"},
         "toctou_candidate": {"TOCTOU", "race condition", "CWE-367"},
         "workflow_injection": {"GitHub Actions", "workflow injection", "pull_request_target", "CWE-829"},
     }
-    CWE = {"command_injection": "CWE-78", "workflow_injection": "CWE-829", "authentication_bypass": "CWE-347", "privilege_assignment": "CWE-266", "authorization_scope_candidate": "CWE-639", "toctou_candidate": "CWE-367", "code_execution": "CWE-94", "unsafe_deserialization": "CWE-502", "possible_ssrf": "CWE-918", "sql_injection": "CWE-89", "template_injection": "CWE-1336", "path_traversal": "CWE-22"}
+    CWE = {"command_injection": "CWE-78", "workflow_injection": "CWE-829", "authentication_bypass": "CWE-347", "privilege_assignment": "CWE-266", "authorization_scope_candidate": "CWE-639", "concurrency_race_candidate": "CWE-362", "toctou_candidate": "CWE-367", "code_execution": "CWE-94", "unsafe_deserialization": "CWE-502", "possible_ssrf": "CWE-918", "sql_injection": "CWE-89", "template_injection": "CWE-1336", "path_traversal": "CWE-22"}
 
     def run(self, audit_data: dict, finding: dict) -> dict:
         context = audit_data.get("public_context", {})
@@ -2109,8 +2186,8 @@ class DuplicateReviewAgent:
 
 
 def _automatic_claim(finding: dict, duplicate_review: dict, reachability: dict, evidence_gate: dict) -> dict:
-    cwe = {"command_injection": "CWE-78", "workflow_injection": "CWE-829", "authentication_bypass": "CWE-347", "privilege_assignment": "CWE-266", "authorization_scope_candidate": "CWE-639", "toctou_candidate": "CWE-367", "code_execution": "CWE-94", "sql_injection": "CWE-89", "unsafe_deserialization": "CWE-502", "possible_ssrf": "CWE-918", "path_traversal": "CWE-22"}.get(finding["kind"], "CWE pending review")
-    label = {"command_injection": "Command injection", "workflow_injection": "Workflow trust-boundary injection", "authentication_bypass": "Authentication verification bypass", "privilege_assignment": "Untrusted privilege assignment", "authorization_scope_candidate": "Authorization scope bypass candidate", "toctou_candidate": "TOCTOU race candidate", "code_execution": "Code execution"}.get(finding["kind"], finding["kind"])
+    cwe = {"command_injection": "CWE-78", "workflow_injection": "CWE-829", "authentication_bypass": "CWE-347", "privilege_assignment": "CWE-266", "authorization_scope_candidate": "CWE-639", "concurrency_race_candidate": "CWE-362", "toctou_candidate": "CWE-367", "code_execution": "CWE-94", "sql_injection": "CWE-89", "unsafe_deserialization": "CWE-502", "possible_ssrf": "CWE-918", "path_traversal": "CWE-22"}.get(finding["kind"], "CWE pending review")
+    label = {"command_injection": "Command injection", "workflow_injection": "Workflow trust-boundary injection", "authentication_bypass": "Authentication verification bypass", "privilege_assignment": "Untrusted privilege assignment", "authorization_scope_candidate": "Authorization scope bypass candidate", "concurrency_race_candidate": "Unsynchronized security-state race candidate", "toctou_candidate": "TOCTOU race candidate", "code_execution": "Code execution"}.get(finding["kind"], finding["kind"])
     claim = claim_template(finding)
     matches = ", ".join(item.get("id") or item.get("ghsa") or item.get("cve") or "unknown" for item in duplicate_review["matches"])
     duplicate_text = f"Potential matches require human comparison: {matches}" if matches else f'No keyword match among {duplicate_review["checked"]} collected advisories; broader manual search is still required.'

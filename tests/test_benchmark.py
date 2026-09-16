@@ -31,7 +31,7 @@ class BenchmarkTests(unittest.TestCase):
 
     def test_default_corpus_passes_after_known_semantic_fixes(self):
         result = run_benchmark(Path("benchmarks/corpus.json"))
-        self.assertEqual(result["metrics"]["total_cases"], 41)
+        self.assertEqual(result["metrics"]["total_cases"], 45)
         self.assertEqual(result["metrics"]["false_negative_cases"], 0)
         self.assertEqual(result["metrics"]["false_positive_cases"], 0)
         allowlist = next(case for case in result["cases"] if case["id"] == "python-allowlist-command")

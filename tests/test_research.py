@@ -227,6 +227,20 @@ class ResearchTests(unittest.TestCase):
         self.assertIn("privilege_assignment", {item.kind for item in findings})
         self.assertEqual(clean_findings, [])
 
+    def test_python_scan_detects_unsynchronized_security_state(self):
+        rate_race = Path("benchmarks/cases/python_rate_limit_race")
+        locked_rate = Path("benchmarks/cases/python_locked_rate_limit")
+        nonce_race = Path("benchmarks/cases/python_nonce_race")
+        locked_nonce = Path("benchmarks/cases/python_locked_nonce")
+        rate_findings, _ = SourceScanAgent().run(rate_race, "fixture/rate-race", "9" * 40)
+        locked_rate_findings, _ = SourceScanAgent().run(locked_rate, "fixture/locked-rate", "a" * 40)
+        nonce_findings, _ = SourceScanAgent().run(nonce_race, "fixture/nonce-race", "b" * 40)
+        locked_nonce_findings, _ = SourceScanAgent().run(locked_nonce, "fixture/locked-nonce", "c" * 40)
+        self.assertIn("concurrency_race_candidate", {item.kind for item in rate_findings})
+        self.assertIn("concurrency_race_candidate", {item.kind for item in nonce_findings})
+        self.assertEqual(locked_rate_findings, [])
+        self.assertEqual(locked_nonce_findings, [])
+
     def test_repository_profile_records_packages_languages_and_entrypoints(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
