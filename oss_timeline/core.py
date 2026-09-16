@@ -392,11 +392,11 @@ class CandidateAgent:
             result.warnings.append(f"커밋 상세 조사 상한 {self.max_details}건에 도달했습니다")
 
 
-def forecast(publications: list[str], months: int = 12, as_of: datetime | None = None) -> dict:
+def forecast(publications: list[str], months: int = 12, as_of: datetime | None = None, context: dict | None = None) -> dict:
     as_of = as_of or datetime.now(UTC)
     observed = [x for x in (parse_time(v) for v in publications) if x and x <= as_of]
     if len(observed) < 5 or (as_of - min(observed)).days < 730:
-        return {"status": "insufficient_data", "reason": "공개 공지 5건 및 관측 기간 24개월 이상 필요"}
+        return {"status": "insufficient_data", "reason": "공개 공지 5건 및 관측 기간 24개월 이상 필요", "historical_publications": len(observed), "context": context or {}, "zero_day_count": None}
     years = (as_of - min(observed)).days / 365.2425
     annual = len(observed) / years
     # Gamma-Poisson posterior predictive interval; fixed seed keeps reports reproducible.
@@ -416,7 +416,21 @@ def forecast(publications: list[str], months: int = 12, as_of: datetime | None =
         else:
             draws.append(max(0, round(rng.gauss(lam, math.sqrt(lam)))))
     draws.sort()
-    return {"status": "estimated", "horizon_months": months, "historical_publications": len(observed), "annual_observed_rate": round(annual, 2), "expected": round(shape / rate * months / 12, 1), "interval_90": [draws[499], draws[9499]], "target": "future_public_advisories", "zero_day_count": None}
+    recent_cutoff = as_of - timedelta(days=365)
+    previous_cutoff = as_of - timedelta(days=730)
+    recent_count = sum(value >= recent_cutoff for value in observed)
+    previous_count = sum(previous_cutoff <= value < recent_cutoff for value in observed)
+    confidence = "high" if len(observed) >= 25 and years >= 5 else "moderate" if len(observed) >= 10 and years >= 3 else "low"
+    backtest = {"status": "not_available", "reason": "최소 3년의 이력과 학습 구간 공지 5건 필요"}
+    holdout_start = as_of - timedelta(days=365)
+    training = [value for value in observed if value < holdout_start]
+    if len(training) >= 5 and (holdout_start - min(training)).days >= 730:
+        trained = forecast([value.isoformat() for value in training], 12, holdout_start)
+        if trained.get("status") == "estimated":
+            actual = sum(value >= holdout_start for value in observed)
+            interval = trained["interval_90"]
+            backtest = {"status": "evaluated", "train_through": holdout_start.isoformat(), "expected": trained["expected"], "interval_90": interval, "actual": actual, "covered": interval[0] <= actual <= interval[1]}
+    return {"status": "estimated", "method": "gamma_poisson_posterior_predictive", "horizon_months": months, "historical_publications": len(observed), "observation_years": round(years, 2), "annual_observed_rate": round(annual, 2), "recent_12_months": recent_count, "previous_12_months": previous_count, "expected": round(shape / rate * months / 12, 1), "interval_90": [draws[499], draws[9499]], "confidence": confidence, "backtest": backtest, "context": context or {}, "context_usage": "활동량과 코드 규모는 표시만 하며 보정 전에는 예측값에 사용하지 않음", "assumptions": ["공개 공지 도착률이 예측 구간에서 급변하지 않음", "수집 누락과 공지 지연이 과거와 유사함"], "target": "future_public_advisories", "zero_day_count": None}
 
 
 class Store:
@@ -532,14 +546,15 @@ class Store:
             raise ValueError("저장되지 않은 저장소입니다")
         scope = [x["name"] for x in repositories]
         if not scope:
-            return {"repositories": [], "ranking": [], "packages": [], "fix_versions": [], "timeline": [], "findings": [], "advisory_observations": [], "research_timeline": [], "research_runs": [], "research_findings": [], "forecast": {"status": "insufficient_data"}}
+            return {"repositories": [], "ranking": [], "packages": [], "fix_versions": [], "timeline": [], "findings": [], "advisory_observations": [], "research_timeline": [], "research_runs": [], "research_findings": [], "repository_forecasts": {}, "forecast": {"status": "insufficient_data"}}
         marks = ",".join("?" for _ in scope)
         ranking = [dict(x) for x in self.db.execute(f"SELECT repo,COUNT(DISTINCT advisory_id) AS advisories FROM advisory_repos WHERE repo IN ({marks}) GROUP BY repo ORDER BY advisories DESC,repo", scope)]
         packages = [dict(x) for x in self.db.execute(f"SELECT repo,ecosystem,name,COUNT(DISTINCT advisory_id) AS advisories FROM advisory_packages WHERE repo IN ({marks}) GROUP BY repo,ecosystem,name ORDER BY advisories DESC,repo,name", scope)]
         fix_versions = [dict(x) for x in self.db.execute(f"SELECT advisory_id,repo,ecosystem,name,version_range,patched FROM advisory_packages WHERE repo IN ({marks}) ORDER BY repo,name,advisory_id", scope)]
         timeline = [dict(x) for x in self.db.execute(f"SELECT a.id,a.ghsa,a.cve,a.published_at AS at,a.modified_at,a.first_seen,a.summary AS title,a.url,a.severity,a.cwe_ids,a.cwe_names,ar.repo,'advisory' AS kind FROM advisories a JOIN advisory_repos ar ON ar.advisory_id=a.id WHERE ar.repo IN ({marks}) AND a.published_at IS NOT NULL UNION ALL SELECT a.id,a.ghsa,a.cve,a.modified_at AS at,a.modified_at,a.first_seen,a.summary AS title,a.url,a.severity,a.cwe_ids,a.cwe_names,ar.repo,'advisory_update' AS kind FROM advisories a JOIN advisory_repos ar ON ar.advisory_id=a.id WHERE ar.repo IN ({marks}) AND a.modified_at IS NOT NULL AND a.modified_at!=a.published_at UNION ALL SELECT id,NULL,NULL,at,NULL,first_seen,title,url,NULL,NULL,NULL,repo,kind FROM events WHERE repo IN ({marks}) ORDER BY at DESC LIMIT ?", [*scope, *scope, *scope, limit])]
         findings = [dict(x) for x in self.db.execute(f"SELECT * FROM findings WHERE repo IN ({marks}) ORDER BY at DESC LIMIT ?", [*scope, limit])]
-        publications = [x["published_at"] for x in self.db.execute(f"SELECT DISTINCT a.id,a.published_at FROM advisories a JOIN advisory_repos ar ON ar.advisory_id=a.id WHERE ar.repo IN ({marks}) AND a.published_at IS NOT NULL", scope)]
+        publication_rows = [dict(x) for x in self.db.execute(f"SELECT DISTINCT ar.repo,a.id,a.published_at FROM advisories a JOIN advisory_repos ar ON ar.advisory_id=a.id WHERE ar.repo IN ({marks}) AND a.published_at IS NOT NULL", scope)]
+        publications = [x["published_at"] for x in publication_rows]
         for item in repositories:
             item["coverage"] = json.loads(item["coverage"])
             item["warnings"] = json.loads(item["warnings"])
@@ -561,7 +576,17 @@ class Store:
             item["profile"] = json.loads(item["profile"])
         for item in research_findings:
             item["trace"] = json.loads(item["trace"])
-        return {"generated_at": now(), "repositories": repositories, "ranking": ranking, "packages": packages, "fix_versions": fix_versions, "timeline": timeline, "findings": findings, "advisory_observations": observations, "research_timeline": research_timeline, "research_runs": research_runs, "research_findings": research_findings, "forecast": forecast(publications)}
+        cutoff = (datetime.now(UTC) - timedelta(days=365)).isoformat()
+        activity = {row["repo"]: row["count"] for row in self.db.execute(f"SELECT repo,COUNT(*) AS count FROM events WHERE repo IN ({marks}) AND at>=? GROUP BY repo", [*scope, cutoff])}
+        latest_profiles = {}
+        for run in research_runs:
+            latest_profiles.setdefault(run["repo"], run.get("profile") or {})
+        repository_forecasts = {}
+        for name in scope:
+            context = {"updates_last_12_months": activity.get(name, 0), "code_files": latest_profiles.get(name, {}).get("code_files"), "calibrated_predictor": False}
+            repository_forecasts[name] = forecast([row["published_at"] for row in publication_rows if row["repo"] == name], context=context)
+        portfolio_context = {"repositories": len(scope), "updates_last_12_months": sum(activity.values()), "code_files_with_profiles": sum(int((latest_profiles.get(name, {}) or {}).get("code_files") or 0) for name in scope), "calibrated_predictor": False}
+        return {"generated_at": now(), "repositories": repositories, "ranking": ranking, "packages": packages, "fix_versions": fix_versions, "timeline": timeline, "findings": findings, "advisory_observations": observations, "research_timeline": research_timeline, "research_runs": research_runs, "research_findings": research_findings, "repository_forecasts": repository_forecasts, "forecast": forecast(publications, context=portfolio_context)}
 
 
 def synchronize(client: HttpClient, store: Store, repo: str, max_pages: int = 100, max_manifests: int = 100) -> Collection:

@@ -30,7 +30,7 @@ def html_report(data: dict) -> str:
     finding_rows = "".join(f'<tr><td>{escape(x["at"])}</td><td>{escape(x["repo"])}</td><td>{link(x["url"], x["title"])}</td><td>{escape(", ".join(x["reasons"]))}</td><td>{escape(", ".join(x["paths"]))}</td><td>{escape(" | ".join(x["evidence"]))}</td></tr>' for x in data["findings"])
     fc = data["forecast"]
     if fc["status"] == "estimated":
-        forecast_text = f'향후 {fc["horizon_months"]}개월 공개 보안 공지 예상 {fc["expected"]}건 · 90% 예측 구간 {fc["interval_90"][0]}–{fc["interval_90"][1]}건 · 과거 게시율 {fc["annual_observed_rate"]}건/년'
+        forecast_text = f'향후 {fc["horizon_months"]}개월 공개 보안 공지 예상 {fc["expected"]}건 · 90% 예측 구간 {fc["interval_90"][0]}–{fc["interval_90"][1]}건 · 과거 게시율 {fc["annual_observed_rate"]}건/년 · 신뢰 {fc.get("confidence", "미평가")}'
     else:
         forecast_text = fc.get("reason", "관측 데이터가 부족합니다")
     return f'''<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>OSS 보안 타임라인</title><style>

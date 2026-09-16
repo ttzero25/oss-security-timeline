@@ -133,6 +133,10 @@ class TimelineTests(unittest.TestCase):
         self.assertIsNone(result["zero_day_count"])
         self.assertLessEqual(result["interval_90"][0], result["expected"])
         self.assertGreaterEqual(result["interval_90"][1], result["expected"])
+        self.assertEqual(result["method"], "gamma_poisson_posterior_predictive")
+        self.assertEqual(result["confidence"], "low")
+        self.assertEqual(result["backtest"]["status"], "evaluated")
+        self.assertIn("covered", result["backtest"])
 
     def test_html_escapes_untrusted_repository_text(self):
         with tempfile.TemporaryDirectory() as temp:

@@ -110,6 +110,18 @@ class DashboardTests(unittest.TestCase):
             self.assertIn("출처 고정 사례 2개", rendered)
             self.assertIn("실제 저장소 성능을 대신하지 않습니다", rendered)
 
+    def test_summary_shows_forecast_interval_confidence_and_context(self):
+        with tempfile.TemporaryDirectory() as temp:
+            store = Store(Path(temp) / "db.sqlite3")
+            collection = Collection("example/forecast")
+            collection.advisories = [{"id": f"GHSA-aaaa-bbbb-{index:04d}", "ghsa": f"GHSA-aaaa-bbbb-{index:04d}", "cve": None, "published_at": f"{2020 + index}-01-01T00:00:00Z", "modified_at": None, "summary": "Issue", "severity": "medium", "cvss": None, "url": None, "source": "GitHub", "affected": []} for index in range(6)]
+            store.save(collection)
+            rendered = summary(store.report(), [])
+            store.db.close()
+            self.assertIn("90% 구간", rendered)
+            self.assertIn("저장소별 예측 문맥", rendered)
+            self.assertIn("활동량과 코드 규모는 보정 전 참고값", rendered)
+
     def test_graph_links_repo_advisory_cve_cwe_and_package(self):
         with tempfile.TemporaryDirectory() as temp:
             folder = Path(temp)
