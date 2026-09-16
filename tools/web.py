@@ -5,6 +5,7 @@ import argparse
 import html
 import json
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -22,6 +23,7 @@ from oss_timeline.research import ResearchOrchestrator, audit, checkout  # noqa:
 
 CSS = Path(__file__).with_name("web.css").read_text(encoding="utf-8")
 GRAPH_JS = Path(__file__).with_name("graph.js").read_text(encoding="utf-8")
+THEME_JS = Path(__file__).with_name("theme.js").read_text(encoding="utf-8")
 AGENT_DESCRIPTIONS = {
     "InventoryAgent": "저장소 매니페스트에서 배포 가능한 패키지 식별",
     "ChangeAgent": "릴리스와 커밋 변경 기록 수집",
@@ -68,6 +70,13 @@ def research_index(root: Path) -> list[dict]:
                 orchestration = json.loads((path.parent / "orchestration.json").read_text(encoding="utf-8"))
             except (OSError, ValueError, TypeError):
                 orchestration = {}
+            for result in orchestration.get("results", []):
+                evidence_path = path.parent / str(result.get("finding_id", "")) / "evidence.json"
+                try:
+                    evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+                    result["web_evidence"] = {key: evidence.get(key) for key in ("generator", "proof_scope", "mode", "mechanical_result")}
+                except (OSError, ValueError, TypeError):
+                    result["web_evidence"] = {}
             items.append({"repo": data.get("repo", ""), "commit": data.get("commit", ""), "generated_at": data.get("generated_at"), "hypotheses": hypotheses, "poc_contrasts": contrasts, "draft_pairs": drafts, "coverage": coverage, "scan_cache": data.get("scan_cache", {}), "profile": data.get("profile", {}), "orchestration": orchestration, "truncated": bool(coverage.get("truncated"))})
         except (OSError, ValueError, KeyError, TypeError):
             continue
@@ -163,7 +172,7 @@ def disclosure_index(root: Path) -> list[dict]:
             title = finding_id
             if ghsa_text.startswith("# "):
                 title = ghsa_text.splitlines()[0][2:].strip() or finding_id
-            items.append({"key": f"{repo}|{commit}|{finding_id}", "repo": repo, "commit": commit, "finding_id": finding_id, "kind": finding.get("kind", ""), "path": finding.get("path", ""), "sink_line": finding.get("sink_line", ""), "title": title, "mechanical_result": evidence.get("mechanical_result", "not_run"), "validated_at": evidence.get("validated_at"), "verification_mode": evidence.get("mode"), "verified": verified, "drafts_ready": drafts_ready, "submission": submission, "ghsa_text": ghsa_text, "cve_text": cve_text})
+            items.append({"key": f"{repo}|{commit}|{finding_id}", "repo": repo, "commit": commit, "finding_id": finding_id, "kind": finding.get("kind", ""), "path": finding.get("path", ""), "sink_line": finding.get("sink_line", ""), "title": title, "mechanical_result": evidence.get("mechanical_result", "not_run"), "validated_at": evidence.get("validated_at"), "verification_mode": evidence.get("mode"), "generator": evidence.get("generator"), "proof_scope": evidence.get("proof_scope"), "verified": verified, "drafts_ready": drafts_ready, "submission": submission, "ghsa_text": ghsa_text, "cve_text": cve_text})
     return sorted(items, key=lambda item: (item.get("validated_at") or "", item["repo"], item["finding_id"]), reverse=True)
 
 
@@ -343,7 +352,7 @@ def graph_snapshot(db_path: Path, research_root: Path, fix_root: Path, repo: str
 def graph_page(repositories: list[str], selected: str | None = None) -> str:
     options = '<option value="">전체 저장소</option>' + "".join(f'<option value="{esc(name)}"{" selected" if name == selected else ""}>{esc(name)}</option>' for name in repositories)
     body = f'''<section class="page-head graph-head"><span class="eyebrow">KNOWLEDGE GRAPH</span><h1>보안 관계망</h1><p>저장소, 패키지, GHSA·CVE, CWE, fix 참조 커밋과 코드 후보 사이의 연결을 탐색합니다.</p></section>
-    <section class="graph-toolbar" aria-label="관계망 도구"><label for="graph-repo">저장소</label><select id="graph-repo">{options}</select><label for="graph-search">노드 찾기</label><input id="graph-search" type="search" placeholder="CVE, GHSA, CWE, 패키지"><button id="graph-reset" type="button">화면 맞춤</button><span id="graph-count" aria-live="polite"></span></section>
+    <section class="graph-toolbar" aria-label="관계망 도구"><label for="graph-repo">저장소</label><select id="graph-repo">{options}</select><label for="graph-density">표시 밀도</label><select id="graph-density"><option value="80">간단히 · 80</option><option value="200">표준 · 200</option><option value="all">전체</option></select><label for="graph-search">노드 찾기</label><input id="graph-search" type="search" placeholder="CVE, GHSA, CWE, 패키지"><button id="graph-reset" type="button">화면 맞춤</button><span id="graph-count" aria-live="polite"></span></section>
     <section class="graph-workspace"><div class="graph-stage"><canvas id="security-graph" role="img" aria-label="오픈소스 보안 데이터 관계 그래프"></canvas><div class="graph-legend" aria-label="노드 범례"><span data-kind="repository">저장소</span><span data-kind="package">패키지</span><span data-kind="advisory">GHSA</span><span data-kind="cve">CVE</span><span data-kind="cwe">CWE</span><span data-kind="commit">fix 커밋</span><span data-kind="change">공개 변경 후보</span><span data-kind="finding">코드 가설</span></div></div><aside id="graph-detail" class="graph-detail" aria-live="polite"><span class="eyebrow">SELECT A NODE</span><h2>노드를 선택하세요</h2><p>드래그로 이동하고, 휠로 확대·축소할 수 있습니다. 노드를 선택하면 직접 연결된 관계가 강조됩니다.</p></aside></section>
     <noscript><div class="empty">관계망을 보려면 브라우저에서 JavaScript를 활성화하세요.</div></noscript><script src="/graph.js" defer></script>'''
     return page("관계망", "graph", body)
@@ -371,7 +380,8 @@ def reports_page(reports: list[dict], selected_key: str | None = None, document:
         if item["drafts_ready"]:
             key = quote(item["key"], safe="")
             links = f'<div class="report-links"><a href="/reports?report={key}&amp;doc=ghsa">GHSA 초안 보기</a><a href="/reports?report={key}&amp;doc=cve">CVE 브리프 보기</a></div>'
-        cards += f'''<article class="report-card"><div class="report-card-head"><span class="report-state {state_class}">{state}</span><small>{esc(str(item.get("validated_at") or "검증 기록 없음")[:19])}</small></div><h2>{esc(item["title"])}</h2><p>{esc(item["repo"])} · <code>{esc(item["commit"][:12])}</code></p><dl><div><dt>후보 ID</dt><dd>{esc(item["finding_id"])}</dd></div><div><dt>유형</dt><dd>{esc(item["kind"] or "미기재")}</dd></div><div><dt>위치</dt><dd>{esc(item["path"])}:{esc(item["sink_line"])}</dd></div><div><dt>검증 방식</dt><dd>{esc(item.get("verification_mode") or "미실행")}</dd></div><div><dt>제출 참조</dt><dd>{esc(submission.get("reference") or "기록 없음")}</dd></div></dl>{links}</article>'''
+        scope_labels = {"target_execution": "실제 대상 함수 실행", "compatible_sink_control_not_framework_execution": "호환 sink 입력 통제 확인 · 실제 프레임워크 실행 아님"}
+        cards += f'''<article class="report-card"><div class="report-card-head"><span class="report-state {state_class}">{state}</span><small>{esc(str(item.get("validated_at") or "검증 기록 없음")[:19])}</small></div><h2>{esc(item["title"])}</h2><p>{esc(item["repo"])} · <code>{esc(item["commit"][:12])}</code></p><dl><div><dt>후보 ID</dt><dd>{esc(item["finding_id"])}</dd></div><div><dt>유형</dt><dd>{esc(item["kind"] or "미기재")}</dd></div><div><dt>위치</dt><dd>{esc(item["path"])}:{esc(item["sink_line"])}</dd></div><div><dt>생성기</dt><dd>{esc(item.get("generator") or "수동/이전 형식")}</dd></div><div><dt>검증 범위</dt><dd>{esc(scope_labels.get(item.get("proof_scope"), item.get("proof_scope") or "이전 형식 · 범위 미기재"))}</dd></div><div><dt>격리 방식</dt><dd>{esc(item.get("verification_mode") or "미실행")}</dd></div><div><dt>제출 참조</dt><dd>{esc(submission.get("reference") or "기록 없음")}</dd></div></dl>{links}</article>'''
     viewer = ""
     if selected:
         label = "GHSA 비공개 제보 초안" if document == "ghsa" else "CVE 요청 브리프"
@@ -386,7 +396,7 @@ def page(title: str, active: str, content: str, refresh: bool = False) -> str:
     nav = "".join(f'<a class="{"active" if active == key else ""}" href="{url}">{label}</a>' for key, url, label in [("home", "/", "Home"), ("lab", "/lab", "실험실"), ("summary", "/summary", "정리"), ("graph", "/graph", "관계망"), ("reports", "/reports", "리포트")])
     meta = '<meta http-equiv="refresh" content="5">' if refresh else ""
     return f'''<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">{meta}<title>{esc(title)} · OSS Security Timeline</title><style>{CSS}</style></head>
-<body><div class="shell"><header class="topbar"><a class="brand" href="/"><span class="brand-mark">◈</span> OSS Security Timeline</a><nav aria-label="주요 메뉴">{nav}</nav><span class="local-badge">LOCAL ONLY</span></header><main>{content}</main><footer>공개 정보와 로컬 조사 기록을 보여줍니다. 코드 후보는 검증된 취약점이 아닙니다.</footer></div></body></html>'''
+<body><div class="shell"><header class="topbar"><a class="brand" href="/"><span class="brand-mark">◈</span> OSS Security Timeline</a><nav aria-label="주요 메뉴">{nav}</nav><button id="theme-toggle" class="theme-toggle" type="button" aria-label="낮과 밤 밝기 전환">밝기</button><span class="local-badge">LOCAL ONLY</span></header><main>{content}</main><footer>공개 정보와 로컬 조사 기록을 보여줍니다. 코드 후보는 검증된 취약점이 아닙니다.</footer></div><script src="/theme.js" defer></script></body></html>'''
 
 
 def metric(label: str, value: object, detail: str) -> str:
@@ -423,14 +433,15 @@ def home(report: dict, stats: dict, audits: list[dict], agents: list[dict]) -> s
     return page("Home", "home", body)
 
 
-def lab(selected: str | None, report: dict | None, audits: list[dict], job: dict | None, error: str | None, comparisons: dict) -> str:
+def lab(selected: str | None, report: dict | None, audits: list[dict], job: dict | None, error: str | None, comparisons: dict, fix_year: str = "", fix_month: str = "") -> str:
     value = esc("https://github.com/" + selected) if selected else ""
-    form = f'''<form method="post" action="/lab/start" class="repo-form"><label for="repo">GitHub 오픈소스 저장소</label><div class="input-row"><input id="repo" name="repo" type="url" value="{value}" placeholder="https://github.com/owner/repo" autocomplete="url" required><button class="button" type="submit">수집 · 심층 조사 시작 ↗</button></div><small>공개 GitHub 저장소만 허용합니다. 지원되는 제한 PoC는 로컬에서 대조하지만 제보는 자동 제출하지 않습니다.</small></form>'''
+    capabilities = "".join(f"<span>{esc(label)}</span>" for label in ("명령·코드 실행", "SSRF · 네트워크 스텁", "SQL · DB 스텁", "경로 조작 · scratch", "pickle · stdout 전용", "템플릿 sink · 범위 표시"))
+    form = f'''<form method="post" action="/lab/start" class="repo-form"><label for="repo">GitHub 오픈소스 저장소</label><div class="input-row"><input id="repo" name="repo" type="url" value="{value}" placeholder="https://github.com/owner/repo" autocomplete="url" required><button class="button" type="submit">수집 · 심층 조사 시작 ↗</button></div><small>공개 GitHub 저장소만 허용합니다. 지원되는 제한 PoC는 로컬에서 대조하지만 제보는 자동 제출하지 않습니다.</small><div class="capability-list" aria-label="제한 자동 재현 범위">{capabilities}</div></form>'''
     notice = f'<div class="notice error">{esc(error)}</div>' if error else ""
     running = bool(job and job["status"] == "running")
     if job:
         state = "진행 중" if running else "완료" if job["status"] == "complete" else "실패"
-        notice += f'<div class="notice"><b>{esc(job["repo"])} · {state}</b><span>{esc(job["step"] if running else job.get("error") or "수집과 코드 조사가 완료됐습니다.")}</span></div>'
+        notice += f'<div class="notice job-status {"running" if running else "complete" if job["status"] == "complete" else "failed"}"><b>{esc(job["repo"])} · {state}</b><span>{esc(job["step"] if running else job.get("error") or "수집과 코드 조사가 완료됐습니다.")}</span></div>'
     details = ""
     if selected and report:
         repo_data = report["repositories"][0]
@@ -466,29 +477,58 @@ def lab(selected: str | None, report: dict | None, audits: list[dict], job: dict
             gate = stages.get("evidence_gate", {}).get("verdict") or stages.get("reachability_gate", {}).get("verdict") or "미검증"
             candidate_rows.append(f'<tr><td>{esc(finding.get("id"))}</td><td>{esc(finding.get("kind"))}</td><td>{esc(trace)}</td><td>{esc(verdict.get("status", "가설"))}</td><td>{esc(gate)}</td></tr>')
         candidates = "".join(candidate_rows)
+        verification_rows = []
+        scope_labels = {"target_execution": "실제 대상 함수 실행", "compatible_sink_control_not_framework_execution": "호환 sink만 검증 · 실제 프레임워크 실행 아님"}
+        for result in orchestration.get("results", []):
+            stages = result.get("stages", {})
+            build = stages.get("build_environment", {})
+            preflight = build.get("dependency_preflight", {})
+            evidence = result.get("web_evidence", {})
+            dependencies = []
+            if preflight.get("stubbed_by_generator"):
+                dependencies.append("스텁: " + ", ".join(preflight["stubbed_by_generator"]))
+            if preflight.get("missing"):
+                dependencies.append("누락: " + ", ".join(preflight["missing"]))
+            if not dependencies and preflight:
+                dependencies.append("누락 없음")
+            generator = evidence.get("generator") or "미생성"
+            scope = scope_labels.get(evidence.get("proof_scope"), evidence.get("proof_scope") or "검증 기록 없음")
+            contrast = evidence.get("mechanical_result") or stages.get("isolated_contrast", {}).get("status") or "미실행"
+            verification_rows.append(f'<tr><td>{esc(result.get("finding_id"))}</td><td>{esc(build.get("status") or "미실행")}</td><td>{esc(" · ".join(dependencies) or build.get("reason") or "사전검사 기록 없음")}</td><td>{esc(generator)}</td><td>{esc(scope)}</td><td>{esc(contrast)}</td></tr>')
+        verification_table = table(["후보 ID", "빌드 환경", "의존성 사전검사", "PoC 생성기", "검증 범위", "대조 결과"], "".join(verification_rows)) if verification_rows else empty("아직 동적 검증 단계 기록이 없습니다.")
         language_text = ", ".join(f"{name} {amount}" for name, amount in profile.get("languages", {}).items()) or "미확인"
         framework_text = ", ".join(profile.get("frameworks", [])) or "자동 식별 없음"
         recent_changes = profile.get("recent_changes", {})
         profile_rows = "".join(f'<tr><td>{esc(item.get("kind"))}</td><td>{esc(item.get("path"))}:{esc(item.get("line"))}</td><td>{esc(item.get("code"))}</td></tr>' for item in profile.get("entrypoints", [])[:50])
         research_rows = "".join(f'<tr><td>{esc(str(x.get("at") or "")[:19])}</td><td>{esc(x.get("kind"))}</td><td>{esc(x.get("finding_id") or "-")}</td><td>{esc(x.get("status"))}</td></tr>' for x in report.get("research_timeline", [])[:50])
         versions = "".join(f'<tr><td>{esc(x["advisory_id"])}</td><td>{esc(x["ecosystem"])} / {esc(x["name"])}</td><td>{esc(x["version_range"] or "미기재")}</td><td>{esc(x["patched"] or "미기재")}</td></tr>' for x in report.get("fix_versions", []))
-        diff_cards = ""
+        advisory_dates = {str(item.get("id")): str(item.get("at") or "")[:10] for item in advisories}
+        dated_comparisons = []
         for comparison in comparisons.get("comparisons", []):
+            dates = sorted(advisory_dates.get(str(advisory_id), "") for advisory_id in comparison.get("advisory_ids", []) if advisory_dates.get(str(advisory_id)))
+            dated_comparisons.append((comparison, dates[0] if dates else ""))
+        available_years = sorted({date[:4] for _, date in dated_comparisons if len(date) >= 7}, reverse=True)
+        filtered_comparisons = [(comparison, date) for comparison, date in dated_comparisons if (not fix_year or date.startswith(fix_year + "-")) and (not fix_month or len(date) >= 7 and date[5:7] == fix_month)]
+        year_options = '<option value="">전체 연도</option>' + "".join(f'<option value="{esc(year)}"{" selected" if year == fix_year else ""}>{esc(year)}년</option>' for year in available_years)
+        month_options = '<option value="">전체 월</option>' + "".join(f'<option value="{month:02d}"{" selected" if f"{month:02d}" == fix_month else ""}>{month}월</option>' for month in range(1, 13))
+        fix_filter = f'''<form class="fix-filter" method="get" action="/lab"><input type="hidden" name="repo" value="{esc(selected)}"><label for="fix-year">연도</label><select id="fix-year" name="year">{year_options}</select><label for="fix-month">월</label><select id="fix-month" name="month">{month_options}</select><button type="submit">적용</button><a href="/lab?repo={quote(selected)}">초기화</a></form>'''
+        diff_cards = ""
+        for comparison, comparison_date in filtered_comparisons:
             files = ""
             for item in comparison.get("files", []):
                 before = esc(item.get("before") or "삭제된 줄 없음")
                 after = esc(item.get("after") or "추가된 줄 없음")
-                files += f'<div class="diff-file"><h4>{esc(item.get("path"))} <small>{esc(item.get("status"))}</small></h4><div class="diff-pair"><div><span>전 · 삭제된 줄</span><pre>{before}</pre></div><div><span>후 · 추가된 줄</span><pre>{after}</pre></div></div></div>'
+                files += f'<details class="diff-file"><summary>{esc(item.get("path"))} <small>{esc(item.get("status"))}</small></summary><div class="diff-pair"><div><span>전 · 삭제된 줄</span><pre>{before}</pre></div><div><span>후 · 추가된 줄</span><pre>{after}</pre></div></div></details>'
             warning = f'<p class="coverage">{esc(comparison["warning"])}</p>' if comparison.get("warning") else ""
-            diff_cards += f'<article class="panel diff-card"><h3>{esc(", ".join(comparison.get("advisory_ids", [])))}</h3><p>공지에서 참조한 커밋: {safe_link(comparison.get("url"), str(comparison.get("commit") or "")[:12])}</p>{warning}{files or empty("이 커밋의 변경 파일 정보가 제공되지 않았습니다.")}</article>'
+            diff_cards += f'<details class="panel diff-card"><summary><b>{esc(", ".join(comparison.get("advisory_ids", [])))}</b><span>{esc(comparison_date or "날짜 미상")} · {len(comparison.get("files", []))}개 파일</span></summary><p>공지에서 참조한 커밋: {safe_link(comparison.get("url"), str(comparison.get("commit") or "")[:12])}</p>{warning}{files or empty("이 커밋의 변경 파일 정보가 제공되지 않았습니다.")}</details>'
         compare_note = "참조 커밋의 차이는 공지와 연결된 근거이며, 각 변경이 실제 fix인지 사람의 확인이 필요합니다."
         if comparisons.get("truncated"):
             compare_note += " 참조 커밋은 처음 5개만 수집했습니다."
         details = f'''<section><div class="section-heading"><div><span class="eyebrow">SELECTED REPOSITORY</span><h2>{esc(selected)}</h2></div><span class="pill">마지막 수집 {esc(str(repo_data.get("last_sync") or "")[:16])} UTC</span></div><div class="metrics compact">{metric("고유 공지", count, "저장소 연관 공지")}{metric("변경 기록", len(changes), "표시 범위 최대 300건")}{metric("코드 가설", len(hypotheses), "미검증 후보")}{metric("심층 조사", deep_status, "DB 실행 기록 기준")}</div><p class="coverage">수집 범위: {esc(coverage)}<br>경고: {esc(warnings)}</p></section>
 <section><div class="section-heading"><div><span class="eyebrow">ADVISORY TRACKING</span><h2>보안 공지 추적</h2></div><p>CWE는 공지 원문에 명시된 값만 표시</p></div>{table(["시각", "기록", "식별자", "CVE", "취약점 유형 (CWE)", "공지", "심각도"], rows) if rows else empty("이 저장소의 보안 공지 기록이 아직 없습니다.")}</section>
-<section><div class="section-heading"><div><span class="eyebrow">ZERO-DAY RESEARCH</span><h2>미공개 취약점 조사</h2></div><p>후보 ≠ 발견 확정</p></div><div class="notice subdued">소스 스캔은 검토 가설만 만듭니다. 제로데이 판정에는 영향 재현, 중복 공지 확인, 사람의 검토가 필요합니다.</div><p class="coverage">{esc(code_scope)}. 미지원 언어·패턴의 후보 0건은 안전성의 증거가 아닙니다.</p>{table(["후보 ID", "분류", "입력→호출→위험 동작", "상태", "근거 게이트"], candidates) if candidates else empty("코드 가설이 없습니다. 조사 완료 여부와 스캔 범위를 확인하세요.")}</section>'''
+<section><div class="section-heading"><div><span class="eyebrow">ZERO-DAY RESEARCH</span><h2>미공개 취약점 조사</h2></div><p>후보 ≠ 발견 확정</p></div><div class="notice subdued">소스 스캔은 검토 가설만 만듭니다. 제로데이 판정에는 영향 재현, 중복 공지 확인, 사람의 검토가 필요합니다.</div><p class="coverage">{esc(code_scope)}. 미지원 언어·패턴의 후보 0건은 안전성의 증거가 아닙니다.</p>{table(["후보 ID", "분류", "입력→호출→위험 동작", "상태", "근거 게이트"], candidates) if candidates else empty("코드 가설이 없습니다. 조사 완료 여부와 스캔 범위를 확인하세요.")}<h3 class="subheading">동적 PoC·실행 환경</h3>{verification_table}</section>'''
         details += f'''<section><div class="section-heading"><div><span class="eyebrow">REPOSITORY PROFILE</span><h2>코드·패키지 조사 범위</h2></div><p>커밋 {esc((audit_result or {}).get("commit", "")[:12])}</p></div><div class="metrics compact">{metric("확인 파일", profile.get("files_seen", 0), "vendor·생성 디렉터리 제외")}{metric("코드 파일", profile.get("code_files", 0), language_text)}{metric("의존성 항목", profile.get("dependency_count", 0), ", ".join(f"{k} {v}" for k, v in profile.get("dependency_ecosystems", {}).items()) or "지원 lockfile 기준")}</div><p class="coverage">유형 {esc(profile.get("project_kind", "미확인"))} · 프레임워크 {esc(framework_text)} · 최근 변경 분석 커밋 {recent_changes.get("commits_considered", 0)}개/파일 {len(recent_changes.get("files", {}))}개<br>매니페스트 {len(profile.get("manifests", []))}개 · lockfile {len(profile.get("lockfiles", []))}개 · 엔트리포인트 {len(profile.get("entrypoints", []))}개 · 미지원 코드 {profile.get("unsupported_code_files", 0)}개 · 프로필 잘림 {"예" if profile.get("truncated") else "아니오"} · 의존성 잘림 {"예" if profile.get("dependencies_truncated") else "아니오"}</p>{table(["입력 유형", "위치", "코드"], profile_rows) if profile_rows else empty("자동 식별된 엔트리포인트가 없습니다.")}</section><section><div class="section-heading"><div><span class="eyebrow">RESEARCH TIMELINE</span><h2>조사 상태 이력</h2></div><p>공개 공지와 별도 기록</p></div>{table(["시각", "단계", "후보", "상태"], research_rows) if research_rows else empty("아직 저장된 연구 이벤트가 없습니다.")}</section>'''
-        details += f'''<section><div class="section-heading"><div><span class="eyebrow">BEFORE / AFTER</span><h2>Fix 전후 비교</h2></div><p>버전과 공지 참조 커밋 기준</p></div><div class="notice subdued">{esc(compare_note)}</div><h3>영향 버전 → 패치 버전</h3>{table(["공지", "패키지", "영향 범위", "패치 버전"], versions) if versions else empty("공지에 연결된 패키지 버전 정보가 없습니다.")}<h3 class="subheading">참조 커밋의 변경 줄</h3>{diff_cards or empty("저장된 공지 참조 커밋 비교가 없습니다. 새로 수집한 공지에 수정 커밋 링크가 없다면 코드 전후를 자동 연결하지 않습니다.")}</section>'''
+        details += f'''<section><div class="section-heading"><div><span class="eyebrow">BEFORE / AFTER</span><h2>Fix 전후 비교</h2></div><p>버전과 공지 참조 커밋 기준</p></div><div class="notice subdued">{esc(compare_note)}</div><h3>영향 버전 → 패치 버전</h3>{table(["공지", "패키지", "영향 범위", "패치 버전"], versions) if versions else empty("공지에 연결된 패키지 버전 정보가 없습니다.")}<div class="section-heading subheading"><h3>참조 커밋의 변경 줄</h3><p>{len(filtered_comparisons)}/{len(dated_comparisons)}개 비교</p></div>{fix_filter}{diff_cards or empty("선택한 기간에 저장된 fix 비교가 없습니다.")}</section>'''
     elif selected:
         details = "<section>" + empty("아직 이 저장소의 수집 기록이 없습니다. 조사 상태를 확인하세요.") + "</section>"
     body = f'''<section class="page-head"><span class="eyebrow">WORKBENCH</span><h1>실험실</h1><p>저장소 링크 하나로 공개 업데이트와 보안 공지를 수집하고 코드 검토 후보를 조사합니다.</p></section><section class="panel">{form}{notice}</section>{details}'''
@@ -608,6 +648,9 @@ def serve(port: int, db_path: Path, research_root: Path, registry_path: Path) ->
             if path == "/graph.js":
                 self.respond(GRAPH_JS, content_type="text/javascript; charset=utf-8")
                 return
+            if path == "/theme.js":
+                self.respond(THEME_JS, content_type="text/javascript; charset=utf-8")
+                return
             if path in {"/", "/lab", "/summary", "/graph", "/reports", "/api/report", "/api/research", "/api/graph"}:
                 audits = research_index(research_root)
                 if path == "/api/research":
@@ -650,7 +693,14 @@ def serve(port: int, db_path: Path, research_root: Path, registry_path: Path) ->
                 else:
                     with lock:
                         job = jobs.get(selected, {}).copy() if selected else None
-                    self.respond(lab(selected, report, audits, job, error, fix_index(db_path.parent / "fix-comparisons", selected)))
+                    query = parse_qs(parsed.query)
+                    fix_year = query.get("year", [""])[0]
+                    fix_month = query.get("month", [""])[0]
+                    if fix_year and not re.fullmatch(r"20\d{2}", fix_year):
+                        fix_year = ""
+                    if fix_month and not re.fullmatch(r"0[1-9]|1[0-2]", fix_month):
+                        fix_month = ""
+                    self.respond(lab(selected, report, audits, job, error, fix_index(db_path.parent / "fix-comparisons", selected), fix_year, fix_month))
                 return
             if path in {"/agents", "/research"}:
                 self.respond("", status=303, location="/" if path == "/agents" else "/lab")

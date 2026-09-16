@@ -4,6 +4,7 @@
   if (!canvas) return;
   const context = canvas.getContext("2d");
   const repoSelect = document.getElementById("graph-repo");
+  const densitySelect = document.getElementById("graph-density");
   const search = document.getElementById("graph-search");
   const resetButton = document.getElementById("graph-reset");
   const count = document.getElementById("graph-count");
@@ -13,7 +14,7 @@
     cve: "#ff8f82", cwe: "#c49cff", commit: "#8ed0c2",
     change: "#efaa73", finding: "#ff9fc9", weakness: "#b4c4bd"
   };
-  let nodes = [], edges = [], byId = new Map(), adjacency = new Map();
+  let nodes = [], edges = [], byId = new Map(), adjacency = new Map(), rawData = null;
   let selected = null, hovered = null, animation = 0, ticks = 0;
   let width = 900, height = 680, zoom = 1, panX = 0, panY = 0;
   let pointer = null;
@@ -36,14 +37,19 @@
   }
 
   function initialize(data) {
-    nodes = data.nodes.map((node, index) => {
+    rawData = data;
+    const requested = densitySelect.value === "all" ? data.nodes.length : Number(densitySelect.value || 80);
+    const priority = {repository: 0, package: 1, advisory: 2, cve: 3, cwe: 4, commit: 5, finding: 6, change: 7};
+    const visible = data.nodes.slice().sort((a, b) => (priority[a.kind] ?? 9) - (priority[b.kind] ?? 9) || hash(a.id) - hash(b.id)).slice(0, requested);
+    const visibleIds = new Set(visible.map(node => node.id));
+    nodes = visible.map((node, index) => {
       const seed = hash(node.id);
       const angle = (seed % 6283) / 1000;
       const ring = node.kind === "repository" ? 40 : 130 + (seed % 260);
       return Object.assign({}, node, {x: Math.cos(angle) * ring, y: Math.sin(angle) * ring, vx: 0, vy: 0, index});
     });
     byId = new Map(nodes.map(node => [node.id, node]));
-    edges = data.edges.map(edge => Object.assign({}, edge, {sourceNode: byId.get(edge.source), targetNode: byId.get(edge.target)}))
+    edges = data.edges.filter(edge => visibleIds.has(edge.source) && visibleIds.has(edge.target)).map(edge => Object.assign({}, edge, {sourceNode: byId.get(edge.source), targetNode: byId.get(edge.target)}))
       .filter(edge => edge.sourceNode && edge.targetNode);
     adjacency = new Map(nodes.map(node => [node.id, []]));
     for (const edge of edges) {
@@ -52,7 +58,7 @@
     }
     selected = hovered = null;
     ticks = 0;
-    count.textContent = nodes.length + "개 노드 · " + edges.length + "개 연결";
+    count.textContent = nodes.length + "/" + data.nodes.length + "개 노드 · " + edges.length + "개 연결";
     showDetail(null);
     fit();
     cancelAnimationFrame(animation);
@@ -106,6 +112,7 @@
   }
 
   function draw() {
+    const lightTheme = document.documentElement.dataset.theme === "light";
     context.clearRect(0, 0, width, height);
     context.save();
     context.translate(panX, panY);
@@ -116,7 +123,7 @@
     context.lineWidth = 1 / zoom;
     for (const edge of edges) {
       const emphasized = !related || (related.has(edge.source) && related.has(edge.target));
-      context.strokeStyle = emphasized ? "rgba(129,174,157,.42)" : "rgba(91,112,104,.10)";
+      context.strokeStyle = emphasized ? (lightTheme ? "rgba(72,112,98,.25)" : "rgba(129,174,157,.22)") : (lightTheme ? "rgba(90,110,103,.06)" : "rgba(91,112,104,.04)");
       context.beginPath();
       context.moveTo(edge.sourceNode.x, edge.sourceNode.y);
       context.lineTo(edge.targetNode.x, edge.targetNode.y);
@@ -131,14 +138,14 @@
       context.arc(node.x, node.y, radius, 0, Math.PI * 2);
       context.fill();
       if (node === selected || node === hovered || (matches && matches.has(node.id))) {
-        context.strokeStyle = "#eaf8f2";
+        context.strokeStyle = lightTheme ? "#203a31" : "#eaf8f2";
         context.lineWidth = 2 / zoom;
         context.stroke();
       }
       const showLabel = node.kind === "repository" || node === selected || node === hovered || (matches && matches.has(node.id)) || zoom > 1.8;
       if (showLabel) {
         context.globalAlpha = emphasized ? 1 : 0.3;
-        context.fillStyle = "#dcebe5";
+        context.fillStyle = lightTheme ? "#263b33" : "#dcebe5";
         context.font = Math.max(10, 12 / zoom) + "px system-ui, sans-serif";
         context.fillText(node.label.slice(0, 38), node.x + radius + 4 / zoom, node.y + 4 / zoom);
       }
@@ -255,8 +262,10 @@
   }
 
   repoSelect.addEventListener("change", load);
+  densitySelect.addEventListener("change", () => { if (rawData) initialize(rawData); });
   search.addEventListener("input", draw);
   resetButton.addEventListener("click", fit);
+  window.addEventListener("themechange", draw);
   new ResizeObserver(resize).observe(canvas);
   load();
 })();

@@ -15,6 +15,8 @@ class DashboardTests(unittest.TestCase):
             self.assertIn("추적 저장소", rendered)
             self.assertIn("<strong>0</strong>", rendered)
             self.assertNotIn("lodash/lodash", rendered)
+            self.assertIn('id="theme-toggle"', rendered)
+            self.assertIn('src="/theme.js"', rendered)
 
     def test_lab_shows_cve_cwe_and_before_after_versions(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -29,6 +31,22 @@ class DashboardTests(unittest.TestCase):
             self.assertIn(">2.0<", rendered)
             store.db.close()
 
+    def test_fix_comparison_filters_by_year_month_and_uses_dropdowns(self):
+        with tempfile.TemporaryDirectory() as temp:
+            store = Store(Path(temp) / "db.sqlite3")
+            collection = Collection("example/demo")
+            collection.advisories = [{"id": "GHSA-aaaa-bbbb-cccc", "ghsa": "GHSA-aaaa-bbbb-cccc", "cve": None, "published_at": "2026-05-03T00:00:00Z", "modified_at": None, "summary": "Issue", "severity": "high", "cvss": None, "url": None, "source": "GitHub", "affected": []}]
+            store.save(collection)
+            comparisons = {"comparisons": [{"advisory_ids": ["GHSA-aaaa-bbbb-cccc"], "commit": "a" * 40, "url": "https://github.com/example/demo/commit/" + "a" * 40, "files": [{"path": "app.py", "status": "modified", "before": "old", "after": "new"}], "warning": None}], "truncated": False}
+            rendered = lab("example/demo", store.report("example/demo"), [], None, None, comparisons, "2026", "05")
+            store.db.close()
+            self.assertIn('name="year"', rendered)
+            self.assertIn('value="2026" selected', rendered)
+            self.assertIn('name="month"', rendered)
+            self.assertIn('value="05" selected', rendered)
+            self.assertIn('<details class="panel diff-card">', rendered)
+            self.assertIn('<details class="diff-file">', rendered)
+
     def test_lab_shows_multihop_trace_and_evidence_gate(self):
         with tempfile.TemporaryDirectory() as temp:
             store = Store(Path(temp) / "db.sqlite3")
@@ -42,6 +60,25 @@ class DashboardTests(unittest.TestCase):
             self.assertIn("FastAPI", rendered)
             self.assertIn("최근 변경 분석 커밋 4개", rendered)
             store.db.close()
+
+    def test_lab_shows_poc_scope_and_dependency_preflight(self):
+        with tempfile.TemporaryDirectory() as temp:
+            store = Store(Path(temp) / "db.sqlite3")
+            store.save(Collection("example/demo"))
+            finding_id = "FIND-123456789ABC"
+            audits = [{"repo": "example/demo", "commit": "a" * 40, "generated_at": "2026-09-16T00:00:00Z", "hypotheses": [{"id": finding_id, "kind": "template_injection", "path": "view.py", "sink_line": 4}], "coverage": {}, "profile": {}, "orchestration": {"results": [{"finding_id": finding_id, "status": "draft_ready", "web_evidence": {"generator": "bounded_python_template_v1", "proof_scope": "compatible_sink_control_not_framework_execution", "mechanical_result": "contrast_matched"}, "stages": {"build_environment": {"status": "ready", "dependency_preflight": {"stubbed_by_generator": ["flask"], "missing": []}}}}]}}]
+            rendered = lab("example/demo", store.report("example/demo"), audits, None, None, {"comparisons": [], "truncated": False})
+            store.db.close()
+            self.assertIn("동적 PoC·실행 환경", rendered)
+            self.assertIn("bounded_python_template_v1", rendered)
+            self.assertIn("스텁: flask", rendered)
+            self.assertIn("실제 프레임워크 실행 아님", rendered)
+
+    def test_running_lab_uses_neutral_job_status_class(self):
+        rendered = lab(None, None, [], {"repo": "example/demo", "status": "running", "step": "코드 조사 중"}, None, {"comparisons": [], "truncated": False})
+        self.assertIn('class="notice job-status running"', rendered)
+        self.assertIn("SSRF · 네트워크 스텁", rendered)
+        self.assertIn("경로 조작 · scratch", rendered)
 
     def test_restart_marks_running_job_interrupted(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -150,6 +187,8 @@ class DashboardTests(unittest.TestCase):
             rendered = graph_page(["example/demo"], "example/demo")
             self.assertIn('href="/graph"', rendered)
             self.assertIn('src="/graph.js"', rendered)
+            self.assertIn('id="graph-density"', rendered)
+            self.assertIn("간단히 · 80", rendered)
 
     def test_cli_disclosure_artifacts_are_read_only_web_reports(self):
         with tempfile.TemporaryDirectory() as temp:
