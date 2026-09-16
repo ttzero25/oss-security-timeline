@@ -21,6 +21,7 @@ from oss_timeline.fix import collect_reference_diffs  # noqa: E402
 from oss_timeline.research import audit, checkout  # noqa: E402
 
 CSS = Path(__file__).with_name("web.css").read_text(encoding="utf-8")
+GRAPH_JS = Path(__file__).with_name("graph.js").read_text(encoding="utf-8")
 AGENT_DESCRIPTIONS = {
     "InventoryAgent": "저장소 매니페스트에서 배포 가능한 패키지 식별",
     "ChangeAgent": "릴리스와 커밋 변경 기록 수집",
@@ -132,8 +133,114 @@ def snapshot(path: Path, repo: str | None = None) -> tuple[dict, dict]:
         store.db.close()
 
 
+def graph_snapshot(db_path: Path, research_root: Path, fix_root: Path, repo: str | None = None) -> dict:
+    store = Store(db_path)
+    try:
+        db = store.db
+        params = [repo] if repo else []
+        where = " WHERE ar.repo=?" if repo else ""
+        advisory_rows = [dict(x) for x in db.execute(
+            "SELECT a.id,a.ghsa,a.cve,a.summary,a.severity,a.cwe_ids,a.cwe_names,ar.repo "
+            "FROM advisories a JOIN advisory_repos ar ON ar.advisory_id=a.id" + where,
+            params,
+        )]
+        package_rows = [dict(x) for x in db.execute(
+            "SELECT advisory_id,repo,ecosystem,name,version_range,patched FROM advisory_packages"
+            + (" WHERE repo=?" if repo else ""),
+            params,
+        )]
+        finding_rows = [dict(x) for x in db.execute(
+            "SELECT repo,id,title,status FROM findings" + (" WHERE repo=?" if repo else ""),
+            params,
+        )]
+        repositories = [x["repo"] for x in advisory_rows] + [x["repo"] for x in package_rows] + [x["repo"] for x in finding_rows]
+        if repo:
+            repositories.append(repo)
+        else:
+            repositories.extend(x[0] for x in db.execute("SELECT name FROM repositories"))
+    finally:
+        store.db.close()
+
+    nodes: dict[str, dict] = {}
+    edges: set[tuple[str, str, str]] = set()
+
+    def add_node(node_id: str, label: str, kind: str, detail: str = "") -> None:
+        nodes.setdefault(node_id, {"id": node_id, "label": label, "kind": kind, "detail": detail})
+
+    def add_edge(source: str, target: str, relation: str) -> None:
+        if source != target:
+            edges.add((source, target, relation))
+
+    for name in sorted(set(repositories)):
+        add_node("repo:" + name, name, "repository", "GitHub 저장소")
+    for item in advisory_rows:
+        advisory_id = "advisory:" + item["id"]
+        add_node(advisory_id, item["ghsa"] or item["id"], "advisory", f'{item["severity"] or "unknown"} · {item["summary"] or ""}')
+        add_edge("repo:" + item["repo"], advisory_id, "보안 공지")
+        if item["cve"]:
+            cve_id = "cve:" + item["cve"]
+            add_node(cve_id, item["cve"], "cve", "CVE 식별자")
+            add_edge(advisory_id, cve_id, "별칭")
+        try:
+            cwes = json.loads(item["cwe_ids"] or "[]")
+            names = json.loads(item["cwe_names"] or "{}")
+        except (TypeError, ValueError):
+            cwes, names = [], {}
+        for cwe in cwes:
+            cwe_id = "cwe:" + cwe
+            add_node(cwe_id, cwe, "cwe", names.get(cwe, "취약점 유형"))
+            add_edge(advisory_id, cwe_id, "유형")
+    for item in package_rows:
+        package_id = f'package:{item["repo"]}:{item["ecosystem"]}:{item["name"]}'
+        add_node(package_id, item["name"], "package", f'{item["ecosystem"]} · 영향 {item["version_range"] or "미기재"} · 패치 {item["patched"] or "미기재"}')
+        add_edge("repo:" + item["repo"], package_id, "패키지")
+        add_edge("advisory:" + item["advisory_id"], package_id, "영향")
+    for item in finding_rows:
+        finding_id = "change:" + item["repo"] + ":" + item["id"]
+        add_node(finding_id, item["title"] or item["id"], "change", item["status"] or "공개 변경 검토 후보")
+        add_edge("repo:" + item["repo"], finding_id, "변경 후보")
+    audits = research_index(research_root)
+    for audit_item in audits:
+        if repo and audit_item["repo"] != repo:
+            continue
+        for finding in audit_item["hypotheses"]:
+            finding_id = "finding:" + finding["id"]
+            add_node(finding_id, finding["id"], "finding", f'{finding.get("kind", "")} · {finding.get("path", "")}:{finding.get("sink_line", "")}')
+            add_edge("repo:" + audit_item["repo"], finding_id, "코드 후보")
+            kind_id = "weakness:" + finding.get("kind", "unknown")
+            add_node(kind_id, finding.get("kind", "unknown"), "weakness", "정적 분석 가설 유형")
+            add_edge(finding_id, kind_id, "가설 유형")
+    for name in sorted(set(repositories)):
+        comparison_data = fix_index(fix_root, name)
+        for comparison in comparison_data.get("comparisons", []):
+            commit = comparison.get("commit")
+            if not commit:
+                continue
+            commit_id = "commit:" + name + ":" + commit
+            changed = ", ".join(x.get("path", "") for x in comparison.get("files", [])[:4])
+            add_node(commit_id, commit[:12], "commit", changed or "공지 참조 커밋")
+            add_edge("repo:" + name, commit_id, "커밋")
+            for advisory_id in comparison.get("advisory_ids", []):
+                add_edge("advisory:" + advisory_id, commit_id, "fix 참조")
+    return {
+        "nodes": list(nodes.values()),
+        "edges": [{"source": source, "target": target, "relation": relation} for source, target, relation in sorted(edges)],
+        "repositories": sorted(set(repositories)),
+        "selected_repo": repo,
+    }
+
+
+def graph_page(repositories: list[str], selected: str | None = None) -> str:
+    options = '<option value="">전체 저장소</option>' + "".join(f'<option value="{esc(name)}"{" selected" if name == selected else ""}>{esc(name)}</option>' for name in repositories)
+    body = f'''<section class="page-head graph-head"><span class="eyebrow">KNOWLEDGE GRAPH</span><h1>보안 관계망</h1><p>저장소, 패키지, GHSA·CVE, CWE, fix 참조 커밋과 코드 후보 사이의 연결을 탐색합니다.</p></section>
+    <section class="graph-toolbar" aria-label="관계망 도구"><label for="graph-repo">저장소</label><select id="graph-repo">{options}</select><label for="graph-search">노드 찾기</label><input id="graph-search" type="search" placeholder="CVE, GHSA, CWE, 패키지"><button id="graph-reset" type="button">화면 맞춤</button><span id="graph-count" aria-live="polite"></span></section>
+    <section class="graph-workspace"><div class="graph-stage"><canvas id="security-graph" role="img" aria-label="오픈소스 보안 데이터 관계 그래프"></canvas><div class="graph-legend" aria-label="노드 범례"><span data-kind="repository">저장소</span><span data-kind="package">패키지</span><span data-kind="advisory">GHSA</span><span data-kind="cve">CVE</span><span data-kind="cwe">CWE</span><span data-kind="commit">fix 커밋</span><span data-kind="change">공개 변경 후보</span><span data-kind="finding">코드 가설</span></div></div><aside id="graph-detail" class="graph-detail" aria-live="polite"><span class="eyebrow">SELECT A NODE</span><h2>노드를 선택하세요</h2><p>드래그로 이동하고, 휠로 확대·축소할 수 있습니다. 노드를 선택하면 직접 연결된 관계가 강조됩니다.</p></aside></section>
+    <noscript><div class="empty">관계망을 보려면 브라우저에서 JavaScript를 활성화하세요.</div></noscript><script src="/graph.js" defer></script>'''
+    return page("관계망", "graph", body)
+
+
 def page(title: str, active: str, content: str, refresh: bool = False) -> str:
-    nav = "".join(f'<a class="{"active" if active == key else ""}" href="{url}">{label}</a>' for key, url, label in [("home", "/", "Home"), ("lab", "/lab", "실험실"), ("summary", "/summary", "정리")])
+    nav = "".join(f'<a class="{"active" if active == key else ""}" href="{url}">{label}</a>' for key, url, label in [("home", "/", "Home"), ("lab", "/lab", "실험실"), ("summary", "/summary", "정리"), ("graph", "/graph", "관계망")])
     meta = '<meta http-equiv="refresh" content="5">' if refresh else ""
     return f'''<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">{meta}<title>{esc(title)} · OSS Security Timeline</title><style>{CSS}</style></head>
 <body><div class="shell"><header class="topbar"><a class="brand" href="/"><span class="brand-mark">◈</span> OSS Security Timeline</a><nav aria-label="주요 메뉴">{nav}</nav><span class="local-badge">LOCAL ONLY</span></header><main>{content}</main><footer>공개 정보와 로컬 조사 기록을 보여줍니다. 코드 후보는 검증된 취약점이 아닙니다.</footer></div></body></html>'''
@@ -282,7 +389,7 @@ def serve(port: int, db_path: Path, research_root: Path, registry_path: Path) ->
             self.send_header("Content-Length", str(len(payload)))
             self.send_header("Cache-Control", "no-store")
             self.send_header("X-Content-Type-Options", "nosniff")
-            self.send_header("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'")
+            self.send_header("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; script-src 'self'; connect-src 'self'; form-action 'self'; base-uri 'none'")
             if location:
                 self.send_header("Location", location)
             self.end_headers()
@@ -294,20 +401,29 @@ def serve(port: int, db_path: Path, research_root: Path, registry_path: Path) ->
             if path == "/health":
                 self.respond('{"status":"ok"}', content_type="application/json; charset=utf-8")
                 return
-            if path in {"/", "/lab", "/summary", "/api/report", "/api/research"}:
+            if path == "/graph.js":
+                self.respond(GRAPH_JS, content_type="text/javascript; charset=utf-8")
+                return
+            if path in {"/", "/lab", "/summary", "/graph", "/api/report", "/api/research", "/api/graph"}:
                 audits = research_index(research_root)
                 if path == "/api/research":
                     self.respond(json.dumps(audits, ensure_ascii=False), content_type="application/json; charset=utf-8")
                     return
                 selected = None
                 error = None
-                if path == "/lab":
+                if path in {"/lab", "/graph", "/api/graph"}:
                     raw = parse_qs(parsed.query).get("repo", [None])[0]
                     if raw:
                         try:
                             selected = repo_name(raw)
                         except ValueError as exc:
                             error = str(exc)
+                if path == "/api/graph":
+                    if error:
+                        self.respond(json.dumps({"error": error}, ensure_ascii=False), status=400, content_type="application/json; charset=utf-8")
+                    else:
+                        self.respond(json.dumps(graph_snapshot(db_path, research_root, db_path.parent / "fix-comparisons", selected), ensure_ascii=False), content_type="application/json; charset=utf-8")
+                    return
                 try:
                     report, stats = snapshot(db_path, selected)
                 except ValueError:
@@ -318,6 +434,9 @@ def serve(port: int, db_path: Path, research_root: Path, registry_path: Path) ->
                     self.respond(home(report, stats, audits, agent_registry(registry_path)))
                 elif path == "/summary":
                     self.respond(summary(report, audits))
+                elif path == "/graph":
+                    all_report, _ = snapshot(db_path)
+                    self.respond(graph_page([x["name"] for x in all_report["repositories"]], selected))
                 else:
                     with lock:
                         job = jobs.get(selected, {}).copy() if selected else None

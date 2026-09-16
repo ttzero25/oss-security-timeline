@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 
 from oss_timeline.core import Collection, Store
-from tools.web import fix_index, home, lab, load_jobs, snapshot, summary
+from tools.web import fix_index, graph_page, graph_snapshot, home, lab, load_jobs, snapshot, summary
 
 
 class DashboardTests(unittest.TestCase):
@@ -48,6 +48,24 @@ class DashboardTests(unittest.TestCase):
             rendered = summary(store.report(), [])
             self.assertLess(rendered.index(">z/high</a>"), rendered.index(">a/low</a>"))
             store.db.close()
+
+    def test_graph_links_repo_advisory_cve_cwe_and_package(self):
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)
+            database = folder / "db.sqlite3"
+            store = Store(database)
+            collection = Collection("example/demo", packages=[("npm", "demo", "package.json")])
+            collection.advisories = [{"id": "GHSA-aaaa-bbbb-cccc", "ghsa": "GHSA-aaaa-bbbb-cccc", "cve": "CVE-2026-1234", "published_at": "2026-01-01T00:00:00Z", "modified_at": None, "summary": "Path issue", "severity": "high", "cvss": None, "cwe_ids": ["CWE-22"], "cwe_names": {"CWE-22": "Path Traversal"}, "url": None, "source": "GitHub", "affected": [{"ecosystem": "npm", "name": "demo", "range": "< 2.0", "patched": "2.0"}]}]
+            store.save(collection)
+            store.db.close()
+            graph = graph_snapshot(database, folder / "research", folder / "fix", "example/demo")
+            ids = {node["id"] for node in graph["nodes"]}
+            self.assertTrue({"repo:example/demo", "advisory:GHSA-aaaa-bbbb-cccc", "cve:CVE-2026-1234", "cwe:CWE-22", "package:example/demo:npm:demo"} <= ids)
+            relations = {edge["relation"] for edge in graph["edges"]}
+            self.assertTrue({"보안 공지", "별칭", "유형", "영향"} <= relations)
+            rendered = graph_page(["example/demo"], "example/demo")
+            self.assertIn('href="/graph"', rendered)
+            self.assertIn('src="/graph.js"', rendered)
 
 
 if __name__ == "__main__":
