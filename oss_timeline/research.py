@@ -1594,7 +1594,7 @@ class SemanticAnalysisAgent:
             suffix = Path(finding.get("path", "")).suffix
             python_supported = suffix == ".py" and (
                 finding.get("kind") in {"command_injection", "code_execution"}
-                or finding.get("kind") in {"possible_ssrf", "sql_injection"} and (finding.get("source_path") or finding.get("path")) == (finding.get("sink_path") or finding.get("path"))
+                or finding.get("kind") in {"possible_ssrf", "sql_injection", "path_traversal"} and (finding.get("source_path") or finding.get("path")) == (finding.get("sink_path") or finding.get("path"))
             )
             javascript_supported = suffix in {".js", ".mjs", ".cjs"} and finding.get("kind") in {"command_injection", "code_execution"} and (finding.get("source_path") or finding.get("path")) == (finding.get("sink_path") or finding.get("path"))
             go_supported = suffix == ".go" and finding.get("kind") == "command_injection" and (finding.get("source_path") or finding.get("path")) == (finding.get("sink_path") or finding.get("path"))
@@ -1821,6 +1821,95 @@ if (result !== undefined) console.log(Buffer.isBuffer(result) ? result.toString(
         proof = destination / "proof.py"
         if proof.exists():
             raise ValueError("기존 PoC 작업물이 있어 자동 생성으로 덮어쓰지 않습니다")
+        if kind == "path_traversal":
+            target = top_level[0]
+            positional = [*target.args.posonlyargs, *target.args.args]
+            calls = [node for node in ast.walk(target) if isinstance(node, ast.Call)]
+            body_value = getattr(target.body[0], "value", None) if len(target.body) == 1 and isinstance(target.body[0], (ast.Return, ast.Expr)) else None
+            outer = body_value if isinstance(body_value, ast.Call) else None
+            inner = outer.func.value if outer and isinstance(outer.func, ast.Attribute) and outer.func.attr in {"read", "read_text", "read_bytes"} and isinstance(outer.func.value, ast.Call) else None
+            parameter_name = positional[0].arg if len(positional) == 1 else ""
+            inner_name = _qualified(inner.func) if inner else ""
+            safe_constructor = inner_name in {"open", "Path", "pathlib.Path"} and bool(inner.args) and isinstance(inner.args[0], ast.Name) and inner.args[0].id == parameter_name
+            constant_options = bool(inner) and all(isinstance(argument, ast.Constant) for argument in [*inner.args[1:], *outer.args]) and all(isinstance(keyword.value, ast.Constant) for keyword in [*inner.keywords, *outer.keywords])
+            if inner_name == "open" and inner:
+                mode_node = inner.args[1] if len(inner.args) > 1 else next((keyword.value for keyword in inner.keywords if keyword.arg == "mode"), ast.Constant("r"))
+                readonly_open = isinstance(mode_node, ast.Constant) and mode_node.value in {"r", "rb", "rt"} and all(keyword.arg in {"mode", "encoding", "errors", "newline"} for keyword in inner.keywords)
+            else:
+                readonly_open = inner_name in {"Path", "pathlib.Path"} and bool(inner) and len(inner.args) == 1 and not inner.keywords
+            imports = []
+            inert_module = True
+            for node in syntax.body:
+                if isinstance(node, ast.Import):
+                    imports.extend(alias.name for alias in node.names)
+                    inert_module = inert_module and all(alias.name == "pathlib" and alias.asname is None for alias in node.names)
+                elif isinstance(node, ast.ImportFrom):
+                    imports.append(node.module or "")
+                    inert_module = inert_module and node.module == "pathlib" and all(alias.name == "Path" and alias.asname is None for alias in node.names)
+                elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    defaults = [*node.args.defaults, *(value for value in node.args.kw_defaults if value is not None)]
+                    annotations = [argument.annotation for argument in [*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs] if argument.annotation is not None]
+                    if node.args.vararg and node.args.vararg.annotation is not None:
+                        annotations.append(node.args.vararg.annotation)
+                    if node.args.kwarg and node.args.kwarg.annotation is not None:
+                        annotations.append(node.args.kwarg.annotation)
+                    if node.returns is not None:
+                        annotations.append(node.returns)
+                    inert_module = inert_module and node.name not in {"open", "Path", "pathlib"} and not node.decorator_list and not annotations and all(isinstance(value, ast.Constant) for value in defaults)
+                elif not (isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str)):
+                    inert_module = False
+            if (
+                not inert_module
+                or any(name != "pathlib" for name in imports)
+                or isinstance(target, ast.AsyncFunctionDef)
+                or len(positional) != 1
+                or target.args.vararg
+                or target.args.kwarg
+                or target.args.kwonlyargs
+                or len(calls) != 2
+                or outer is not calls[0]
+                or not safe_constructor
+                or not constant_options
+                or not readonly_open
+            ):
+                raise ValueError("자동 Python 경로 PoC는 단일 인자를 open/Path로 읽어 반환하는 동기 함수로 제한됩니다")
+            source_sha = hashlib.sha256(source_file.read_bytes()).hexdigest()
+            script = f'''"""Scratch-only bounded path-traversal reproduction for {finding["id"]}."""
+import hashlib
+import importlib.util
+import os
+import sys
+from pathlib import Path
+
+REPO = os.environ["OSS_POC_REPO"]
+SCRATCH = Path(os.environ["OSS_POC_SCRATCH"]).resolve()
+MARKER = {marker!r}
+TARGET = os.path.join(REPO, {finding["path"]!r})
+
+def drive(case):
+    if hashlib.sha256(open(TARGET, "rb").read()).hexdigest() != {source_sha!r}:
+        raise SystemExit("target source changed")
+    base = SCRATCH / "public"
+    base.mkdir()
+    (base / "safe.txt").write_text("OSS_BENIGN_CONTROL", encoding="utf-8")
+    (SCRATCH / "secret.txt").write_text(MARKER, encoding="utf-8")
+    spec = importlib.util.spec_from_file_location("oss_target", TARGET)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    supplied = str(base / ".." / "secret.txt") if case == "attack" else str(base / "safe.txt")
+    resolved = Path(supplied).resolve()
+    if not resolved.is_relative_to(SCRATCH):
+        raise SystemExit("generated path escaped scratch")
+    result = getattr(module, {finding["function"]!r})(supplied)
+    print(result)
+
+if __name__ == "__main__":
+    drive(sys.argv[1])
+'''
+            manifest = {"finding_id": finding["id"], "repo_path": audit_data["checkout"], "commit": audit_data["commit"], "image": environment["image"], "proof_file": "proof.py", "attack": ["python3", "proof.py", "attack"], "control": ["python3", "proof.py", "control"], "observable": {"type": "stdout_contains", "value": marker}, "timeout_seconds": 30, "generator": "bounded_python_path_v1", "target_source_sha256": source_sha, "filesystem_policy": "scratch_read_only_fixture"}
+            proof.write_text(script, encoding="utf-8")
+            manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+            return manifest_path
         if kind == "sql_injection":
             target = top_level[0]
             positional = [*target.args.posonlyargs, *target.args.args]
@@ -2526,7 +2615,7 @@ class DuplicateReviewAgent:
 
 def _automatic_claim(finding: dict, duplicate_review: dict, reachability: dict, evidence_gate: dict) -> dict:
     cwe = {"buffer_overflow": "CWE-121", "command_injection": "CWE-78", "workflow_injection": "CWE-829", "authentication_bypass": "CWE-347", "privilege_assignment": "CWE-266", "authorization_scope_candidate": "CWE-639", "concurrency_race_candidate": "CWE-362", "toctou_candidate": "CWE-367", "code_execution": "CWE-94", "sql_injection": "CWE-89", "unsafe_deserialization": "CWE-502", "possible_ssrf": "CWE-918", "path_traversal": "CWE-22"}.get(finding["kind"], "CWE pending review")
-    label = {"buffer_overflow": "Stack buffer overflow candidate", "command_injection": "Command injection", "workflow_injection": "Workflow trust-boundary injection", "authentication_bypass": "Authentication verification bypass", "privilege_assignment": "Untrusted privilege assignment", "authorization_scope_candidate": "Authorization scope bypass candidate", "concurrency_race_candidate": "Unsynchronized security-state race candidate", "toctou_candidate": "TOCTOU race candidate", "code_execution": "Code execution", "sql_injection": "SQL injection", "possible_ssrf": "Server-side request forgery candidate"}.get(finding["kind"], finding["kind"])
+    label = {"buffer_overflow": "Stack buffer overflow candidate", "command_injection": "Command injection", "workflow_injection": "Workflow trust-boundary injection", "authentication_bypass": "Authentication verification bypass", "privilege_assignment": "Untrusted privilege assignment", "authorization_scope_candidate": "Authorization scope bypass candidate", "concurrency_race_candidate": "Unsynchronized security-state race candidate", "toctou_candidate": "TOCTOU race candidate", "code_execution": "Code execution", "sql_injection": "SQL injection", "possible_ssrf": "Server-side request forgery candidate", "path_traversal": "Path traversal candidate"}.get(finding["kind"], finding["kind"])
     claim = claim_template(finding)
     matches = ", ".join(item.get("id") or item.get("ghsa") or item.get("cve") or "unknown" for item in duplicate_review["matches"])
     duplicate_text = f"Potential matches require human comparison: {matches}" if matches else f'No keyword match among {duplicate_review["checked"]} collected advisories; broader manual search is still required.'
@@ -2539,7 +2628,7 @@ def _automatic_claim(finding: dict, duplicate_review: dict, reachability: dict, 
         "default_configuration_evidence": f'{reachability.get("verdict")}: {reachability.get("reason")}',
         "upstream_guard_analysis": "The bounded semantic scan did not model a sanitizing transformation on the cited path. Framework middleware, alternate callers, and guards still require maintainer review.",
         "negative_control_explanation": "The benign input completed without the unique attack marker; only the crafted input produced it.",
-        "remediation": {"sql_injection": "Use parameterized statements and bind attacker-controlled values separately from SQL syntax.", "possible_ssrf": "Allowlist outbound schemes and destinations, reject private or link-local targets after resolution, and revalidate redirects."}.get(finding["kind"], "Avoid interpreting attacker-controlled text as code or a shell command; use fixed operations and validated structured arguments."),
+        "remediation": {"sql_injection": "Use parameterized statements and bind attacker-controlled values separately from SQL syntax.", "possible_ssrf": "Allowlist outbound schemes and destinations, reject private or link-local targets after resolution, and revalidate redirects.", "path_traversal": "Resolve the requested path against a fixed base directory and reject any result outside that base before opening it."}.get(finding["kind"], "Avoid interpreting attacker-controlled text as code or a shell command; use fixed operations and validated structured arguments."),
         "reproduction_steps": ["Use the pinned analyzed commit", "Run the supplied resource-limited PoC verifier", "Compare benign and crafted observations"],
     })
     claim["affected"] = {"ecosystem": "source", "package": finding["repo"], "versions": f'analyzed commit {finding["commit"]}', "patched_version": "Not yet available"}
@@ -2595,7 +2684,7 @@ class ResearchOrchestrator:
                 if manifest_file.is_file():
                     existing_manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
                     proof_name = existing_manifest.get("proof_file", "proof.py")
-                    reusable = existing_manifest.get("generator") in {"bounded_python_v1", "bounded_python_ssrf_v1", "bounded_python_sql_v1", "bounded_javascript_v1", "bounded_go_v1"} and existing_manifest.get("finding_id") == finding["id"] and existing_manifest.get("commit") == audit_data["commit"] and (destination / proof_name).is_file()
+                    reusable = existing_manifest.get("generator") in {"bounded_python_v1", "bounded_python_ssrf_v1", "bounded_python_sql_v1", "bounded_python_path_v1", "bounded_javascript_v1", "bounded_go_v1"} and existing_manifest.get("finding_id") == finding["id"] and existing_manifest.get("commit") == audit_data["commit"] and (destination / proof_name).is_file()
                     if not reusable:
                         raise ValueError("기존 수동 PoC 작업물이 있어 자동 생성으로 덮어쓰지 않습니다")
                     generation_status = "reused"
