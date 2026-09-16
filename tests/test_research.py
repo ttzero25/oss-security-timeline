@@ -535,6 +535,23 @@ print(result.stdout)
             self.assertEqual(evidence["mechanical_result"], "contrast_matched")
             self.assertEqual(evidence["proof_scope"], "compatible_sink_control_not_framework_execution")
 
+    def test_python_build_preflight_blocks_unavailable_imports(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repo = Path(temp)
+            (repo / "app.py").write_text('''import package_that_does_not_exist_oss_timeline\n\ndef run(command):\n    return command\n''', encoding="utf-8")
+            environment = BuildEnvironmentAgent().run(repo, {"path": "app.py", "kind": "command_injection"})
+            self.assertEqual(environment["status"], "unsupported")
+            self.assertEqual(environment["dependency_preflight"]["missing"], ["package_that_does_not_exist_oss_timeline"])
+
+    def test_python_build_preflight_allows_generator_stub(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repo = Path(temp)
+            (repo / "view.py").write_text('''from flask import render_template_string\n\ndef render(content):\n    return render_template_string(content)\n''', encoding="utf-8")
+            environment = BuildEnvironmentAgent().run(repo, {"path": "view.py", "kind": "template_injection"})
+            self.assertEqual(environment["status"], "ready")
+            classified = environment["dependency_preflight"]["standard_or_installed"] + environment["dependency_preflight"]["stubbed_by_generator"]
+            self.assertIn("flask", classified)
+
     def test_go_limited_poc_runs_single_file_handler_with_contrast(self):
         with tempfile.TemporaryDirectory() as temp:
             folder = Path(temp)

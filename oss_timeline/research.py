@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import hashlib
+import importlib.util
 import json
 import os
 import posixpath
@@ -1662,7 +1663,39 @@ class BuildEnvironmentAgent:
         suffix = Path(finding["path"]).suffix
         if suffix == ".py":
             manifests = [name for name in ("pyproject.toml", "setup.py", "setup.cfg", "requirements.txt") if (checkout_root / name).is_file()]
-            return {"status": "ready", "runtime": "python", "executable": sys.executable, "image": "python:3.11-slim", "manifests": manifests, "default_execution": "limited_process", "dependency_install": "disabled"}
+            source = (checkout_root / finding["path"]).resolve()
+            try:
+                tree = _python_parse(source.read_text(encoding="utf-8"))
+            except (OSError, UnicodeError, SyntaxError) as exc:
+                return {"status": "unsupported", "runtime": "python", "reason": f"Python import preflight failed: {exc}", "manifests": manifests, "dependency_install": "disabled"}
+            imports: set[str] = set()
+            relative_imports = 0
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    imports.update(alias.name.split(".", 1)[0] for alias in node.names)
+                elif isinstance(node, ast.ImportFrom):
+                    if node.level:
+                        relative_imports += 1
+                    elif node.module:
+                        imports.add(node.module.split(".", 1)[0])
+            stub_allowlist = {"possible_ssrf": {"requests", "httpx"}, "template_injection": {"flask"}}.get(finding.get("kind"), set())
+            installed, local, stubbed, missing = [], [], [], []
+            for name in sorted(imports):
+                is_local = any(candidate.exists() for base in (source.parent, checkout_root) for candidate in (base / f"{name}.py", base / name / "__init__.py", base / name))
+                if name in sys.stdlib_module_names:
+                    installed.append(name)
+                elif is_local:
+                    local.append(name)
+                elif importlib.util.find_spec(name) is not None:
+                    installed.append(name)
+                elif name in stub_allowlist:
+                    stubbed.append(name)
+                else:
+                    missing.append(name)
+            preflight = {"imports": sorted(imports), "standard_or_installed": installed, "local": local, "stubbed_by_generator": stubbed, "missing": missing, "relative_imports": relative_imports}
+            if missing:
+                return {"status": "unsupported", "runtime": "python", "reason": "Missing Python imports with dependency installation disabled: " + ", ".join(missing), "manifests": manifests, "dependency_install": "disabled", "dependency_preflight": preflight}
+            return {"status": "ready", "runtime": "python", "executable": sys.executable, "image": "python:3.11-slim", "manifests": manifests, "default_execution": "limited_process", "dependency_install": "disabled", "dependency_preflight": preflight}
         if suffix in {".js", ".mjs", ".cjs"}:
             executable = shutil.which("node")
             if not executable:
