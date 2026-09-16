@@ -13,3 +13,5 @@ After the first observation, commit collection requests only the interval since 
 The lab's before/after section compares advisory-linked vulnerable and patched package versions. It also displays removed and added lines from at most five commit URLs explicitly cited by advisories and belonging to the selected GitHub repository. These referenced diffs are evidence to review, not an automatic claim that a commit fully fixes a vulnerability.
 
 Web job status is saved under `data/web-jobs.json`. On restart, a job that was still running is marked interrupted rather than silently disappearing; it is not automatically resumed.
+
+At startup the web process reconciles completed legacy `audit.json` plus `orchestration.json` pairs into `research_runs` without executing target code again. An audit without an orchestration result remains labeled as static-only rather than being shown as never run.

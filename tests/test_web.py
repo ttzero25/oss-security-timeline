@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 
 from oss_timeline.core import Collection, Store
-from tools.web import disclosure_index, fix_index, graph_page, graph_snapshot, home, lab, load_jobs, reports_page, snapshot, summary
+from tools.web import disclosure_index, fix_index, graph_page, graph_snapshot, home, lab, load_jobs, reconcile_research_runs, reports_page, research_status, snapshot, summary
 
 
 class DashboardTests(unittest.TestCase):
@@ -51,6 +51,37 @@ class DashboardTests(unittest.TestCase):
             self.assertEqual(jobs["example/demo"]["status"], "failed")
             self.assertIn("중단", jobs["example/demo"]["error"])
             self.assertEqual(fix_index(Path(temp), "example/demo")["comparisons"], [])
+
+    def test_reconciles_legacy_orchestration_without_rerunning_it(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            database = root / "db.sqlite3"
+            research = root / "research"
+            folder = research / "example_demo" / ("a" * 40)
+            folder.mkdir(parents=True)
+            store = Store(database)
+            store.save(Collection("example/demo"))
+            store.db.close()
+            audit = {"repo": "example/demo", "commit": "a" * 40, "generated_at": "2026-09-16T00:00:00Z", "coverage": {}, "profile": {}, "hypotheses": []}
+            orchestration = {"repo": "example/demo", "commit": "a" * 40, "generated_at": "2026-09-16T00:01:00Z", "execution_mode": "limited_process", "results": []}
+            (folder / "audit.json").write_text(json.dumps(audit), encoding="utf-8")
+            (folder / "orchestration.json").write_text(json.dumps(orchestration), encoding="utf-8")
+            first = reconcile_research_runs(database, research)
+            second = reconcile_research_runs(database, research)
+            self.assertEqual(first["imported"], 1)
+            self.assertEqual(second["already_present"], 1)
+            store = Store(database)
+            run = store.report("example/demo")["research_runs"][0]
+            store.db.close()
+            self.assertEqual(run["status"], "no_candidates")
+
+    def test_research_status_distinguishes_static_and_completed_runs(self):
+        self.assertEqual(research_status(None, None), "미실행")
+        self.assertEqual(research_status({"orchestration": {}}, None), "정적 조사만 완료")
+        self.assertEqual(research_status({"orchestration": {"results": []}}, None), "결과 파일 있음 · DB 미연동")
+        self.assertEqual(research_status(None, {"status": "no_candidates"}), "완료 · 후보 없음")
+        self.assertEqual(research_status(None, {"status": "candidates"}), "완료 · 검토 후보 있음")
+        self.assertEqual(research_status(None, {"status": "draft_ready"}), "완료 · 초안 준비")
 
     def test_summary_orders_repositories_by_advisory_count(self):
         with tempfile.TemporaryDirectory() as temp:
