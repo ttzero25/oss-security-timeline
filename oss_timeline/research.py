@@ -30,6 +30,7 @@ JS_SINKS = [
     ("possible_ssrf", re.compile(r"\b(?:fetch|axios\.(?:get|post|request)|https?\.(?:get|request))\s*\(")),
     ("sql_injection", re.compile(r"\b[A-Za-z_$][\w$]*\.(?:query|execute)\s*\(")),
     ("path_traversal", re.compile(r"\bfs\.(?:readFile|readFileSync|writeFile|writeFileSync|createReadStream|createWriteStream)\s*\(")),
+    ("authentication_bypass", re.compile(r"\b(?:jwt|jsonwebtoken)\.decode\s*\(")),
 ]
 GO_SOURCE = re.compile(r"\b(?:r\.(?:FormValue|PostFormValue)\s*\(|r\.URL\.Query\(\)\.Get\s*\(|r\.Header\.Get\s*\(|(?:c|ctx)\.(?:Query|QueryParam|Param|PostForm|FormValue)\s*\(|os\.Args\s*\[|flag\.Arg\s*\(|os\.Getenv\s*\()")
 PUBLIC_INPUT_NAMES = {"args", "body", "command", "content", "data", "filename", "input", "limit", "params", "path", "payload", "query", "url"}
@@ -141,7 +142,7 @@ def _qualified(node: ast.AST) -> str:
 def _request_source(node: ast.AST) -> bool:
     for child in ast.walk(node):
         qualified = _qualified(child)
-        if qualified.startswith(("request.args", "request.form", "request.values", "request.json", "request.GET", "request.POST", "sys.argv")) or qualified == "request.get_json":
+        if qualified.startswith(("request.args", "request.form", "request.values", "request.json", "request.headers", "request.cookies", "request.GET", "request.POST", "sys.argv")) or qualified == "request.get_json":
             return True
         if isinstance(child, ast.Call) and _qualified(child.func) == "input":
             return True
@@ -229,9 +230,83 @@ def _sink_kind(node: ast.Call) -> tuple[str, ast.AST] | None:
         return "sql_injection", node.args[0]
     if name in {"render_template_string", "flask.render_template_string", "jinja2.Template"}:
         return "template_injection", node.args[0]
+    if name == "os.open" and any(isinstance(item, ast.Attribute) and item.attr in {"O_EXCL", "O_NOFOLLOW"} for item in ast.walk(node)):
+        return None
     if name in {"open", "os.open", "pathlib.Path", "Path"} or name.endswith((".read_text", ".read_bytes", ".write_text", ".write_bytes")):
         return "path_traversal", node.args[0]
+    if name.endswith("jwt.decode"):
+        disabled = any(keyword.arg == "verify" and isinstance(keyword.value, ast.Constant) and keyword.value.value is False for keyword in node.keywords)
+        for keyword in node.keywords:
+            if keyword.arg != "options" or not isinstance(keyword.value, ast.Dict):
+                continue
+            for key, value in zip(keyword.value.keys, keyword.value.values):
+                if isinstance(key, ast.Constant) and key.value == "verify_signature" and isinstance(value, ast.Constant) and value.value is False:
+                    disabled = True
+        if disabled:
+            return "authentication_bypass", node.args[0]
     return None
+
+
+def _python_toctou_hypotheses(filename: Path, root: Path, repo: str, commit: str) -> list[Hypothesis]:
+    try:
+        text = filename.read_text(encoding="utf-8")
+        tree = _python_parse(text)
+    except (OSError, UnicodeError, SyntaxError):
+        return []
+    lines = text.splitlines()
+    path = filename.relative_to(root).as_posix()
+    output = []
+    checks = {"os.path.exists", "os.path.lexists", "os.path.isfile", "os.path.isdir", "os.access"}
+    effects = {"open", "os.open", "os.remove", "os.unlink", "os.rename", "os.replace", "shutil.copy", "shutil.copyfile", "shutil.move"}
+    for function in (node for node in ast.walk(tree) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))):
+        origins: dict[str, tuple[int, str, str, str]] = {}
+        route = any(isinstance(decorator, ast.Call) and _qualified(decorator.func).rsplit(".", 1)[-1] in {"route", "get", "post", "put", "patch", "delete"} for decorator in function.decorator_list)
+        if route or not function.name.startswith("_"):
+            for argument in function.args.posonlyargs + function.args.args + function.args.kwonlyargs:
+                lowered = argument.arg.lower()
+                if (route and argument.arg not in {"self", "cls", "request"}) or lowered in PUBLIC_INPUT_NAMES or lowered.endswith(("_path", "_filename")):
+                    origins[argument.arg] = (function.lineno, lines[function.lineno - 1], "http_route" if route else "modeled_public_api", f"argument:{argument.arg}")
+        observed = []
+        for node in sorted(ast.walk(function), key=lambda item: getattr(item, "lineno", 0)):
+            if isinstance(node, (ast.Assign, ast.AnnAssign)) and node.value is not None:
+                origin = (node.value.lineno, lines[node.value.lineno - 1], "modeled_request", ast.dump(node.value, include_attributes=False)) if _request_source(node.value) else next((origins[name] for name in _name_refs(node.value) if name in origins), None)
+                if origin:
+                    targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                    for target in targets:
+                        if isinstance(target, ast.Name):
+                            origins[target.id] = origin
+            if not isinstance(node, ast.Call) or not node.args:
+                continue
+            name = _qualified(node.func)
+            argument = node.args[0]
+            origin = (argument.lineno, lines[argument.lineno - 1], "modeled_request", ast.dump(argument, include_attributes=False)) if _request_source(argument) else next((origins[item] for item in _name_refs(argument) if item in origins), None)
+            if not origin:
+                continue
+            if name in checks:
+                observed.append((origin, node.lineno, lines[node.lineno - 1]))
+            elif name in effects and not (name == "os.open" and any(isinstance(item, ast.Attribute) and item.attr in {"O_EXCL", "O_NOFOLLOW"} for item in ast.walk(node))):
+                check = next((item for item in reversed(observed) if item[0] == origin and item[1] < node.lineno), None)
+                if check:
+                    trace = [{"role": "source", "path": path, "line": origin[0], "function": function.name, "code": origin[1].strip()[:240]}, {"role": "check", "path": path, "line": check[1], "function": function.name, "code": check[2].strip()[:240]}, {"role": "sink", "path": path, "line": node.lineno, "function": function.name, "code": lines[node.lineno - 1].strip()[:240]}]
+                    output.append(_hypothesis(repo, commit, "toctou_candidate", path, origin[0], node.lineno, origin[1], lines[node.lineno - 1], function.name, entry_kind=origin[2], trace=trace))
+    return output
+
+
+def _workflow_hypotheses(filename: Path, root: Path, repo: str, commit: str) -> list[Hypothesis]:
+    try:
+        lines = filename.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError):
+        return []
+    event = next((index for index, line in enumerate(lines, 1) if re.search(r"\bpull_request_target\s*:", line)), None)
+    unsafe_checkout = next((index for index, line in enumerate(lines, 1) if "github.event.pull_request.head.sha" in line or "github.event.pull_request.head.repo.full_name" in line), None)
+    checkout = max((index for index, line in enumerate(lines, 1) if unsafe_checkout and index < unsafe_checkout and re.search(r"\buses\s*:\s*actions/checkout@", line)), default=None)
+    run = next((index for index, line in enumerate(lines, 1) if unsafe_checkout and index > unsafe_checkout and re.match(r"\s*-?\s*run\s*:", line)), None)
+    intervening_step = checkout and unsafe_checkout and any(re.match(r"\s*-\s+(?:uses|run)\s*:", lines[index - 1]) for index in range(checkout + 1, unsafe_checkout))
+    if not event or not checkout or not unsafe_checkout or not run or intervening_step:
+        return []
+    path = filename.relative_to(root).as_posix()
+    trace = [{"role": "source", "path": path, "line": event, "function": "github_actions_workflow", "code": lines[event - 1].strip()[:240]}, {"role": "checkout", "path": path, "line": unsafe_checkout, "function": "github_actions_workflow", "code": lines[unsafe_checkout - 1].strip()[:240]}, {"role": "sink", "path": path, "line": run, "function": "github_actions_workflow", "code": lines[run - 1].strip()[:240]}]
+    return [_hypothesis(repo, commit, "workflow_injection", path, event, run, lines[event - 1], lines[run - 1], "github_actions_workflow", entry_kind="pull_request_target", trace=trace)]
 
 
 def _hypothesis(repo: str, commit: str, kind: str, path: str, source_line: int, sink_line: int, source_code: str, sink_code: str, function: str, *, source_path: str | None = None, sink_path: str | None = None, entry_kind: str = "modeled_external_input", trace: list[dict] | None = None) -> Hypothesis:
@@ -989,6 +1064,11 @@ def _go_multihop_hypotheses(files: list[Path], root: Path, repo: str, commit: st
         return local if local in functions else None
 
     def sink_for(line: str) -> tuple[str, str] | None:
+        unverified = re.search(r"\b(?:[A-Za-z_]\w*\.)?ParseUnverified\s*\((.*)", line)
+        if unverified:
+            arguments = _go_arguments(unverified.group(1))
+            if arguments:
+                return "authentication_bypass", arguments[0]
         shell = re.search(r"\bexec\.Command(?:Context)?\s*\((.*)", line)
         if shell:
             arguments = _go_arguments(shell.group(1))
@@ -1146,7 +1226,8 @@ class SourceScanAgent:
                     continue
             except OSError:
                 continue
-            if filename.suffix not in {".py", ".js", ".mjs", ".cjs", ".ts", ".mts", ".cts", ".go", *C_EXTENSIONS}:
+            workflow = filename.suffix in {".yml", ".yaml"} and ".github" in filename.relative_to(root).parts and "workflows" in filename.relative_to(root).parts
+            if filename.suffix not in {".py", ".js", ".mjs", ".cjs", ".ts", ".mts", ".cts", ".go", *C_EXTENSIONS} and not workflow:
                 continue
             supported_files.append(filename)
         priority_paths = {Path(path).as_posix() for path in (priority_paths or set())}
@@ -1161,10 +1242,13 @@ class SourceScanAgent:
                 python_files.append(filename)
                 output.extend(_python_hypotheses(filename, root, repo, commit))
                 output.extend(_python_interprocedural_hypotheses(filename, root, repo, commit))
+                output.extend(_python_toctou_hypotheses(filename, root, repo, commit))
             elif filename.suffix in C_EXTENSIONS:
                 output.extend(_c_hypotheses(filename, root, repo, commit))
             elif filename.suffix == ".go":
                 go_files.append(filename)
+            elif filename.suffix in {".yml", ".yaml"}:
+                output.extend(_workflow_hypotheses(filename, root, repo, commit))
             else:
                 javascript_files.append(filename)
         multihop_limit = min(len(python_files), 5_000)
@@ -1173,12 +1257,12 @@ class SourceScanAgent:
         output.extend(_python_multihop_hypotheses(python_files[:multihop_limit], root, repo, commit))
         output.extend(_javascript_multihop_hypotheses(javascript_files[:javascript_limit], root, repo, commit))
         output.extend(_go_multihop_hypotheses(go_files[:go_limit], root, repo, commit))
-        return sorted({x.id: x for x in output}.values(), key=lambda x: (x.path, x.sink_line)), {"files_inspected": len(selected_files), "eligible_files": len(supported_files), "files_skipped_by_limit": len(supported_files) - len(selected_files), "truncated": truncated, "priority_files_requested": len(priority_paths), "priority_files_scanned": priority_scanned, "selection_strategy": "recent_changes_first_then_path", "languages": ["python", "javascript/typescript", "go", "c/c++"], "python_multihop_files": multihop_limit, "python_multihop_truncated": len(python_files) > multihop_limit, "javascript_multihop_files": javascript_limit, "javascript_multihop_truncated": len(javascript_files) > javascript_limit, "go_multihop_files": go_limit, "go_multihop_truncated": len(go_files) > go_limit}
+        return sorted({x.id: x for x in output}.values(), key=lambda x: (x.path, x.sink_line)), {"files_inspected": len(selected_files), "eligible_files": len(supported_files), "files_skipped_by_limit": len(supported_files) - len(selected_files), "truncated": truncated, "priority_files_requested": len(priority_paths), "priority_files_scanned": priority_scanned, "selection_strategy": "recent_changes_first_then_path", "languages": ["python", "javascript/typescript", "go", "c/c++", "github-actions"], "python_multihop_files": multihop_limit, "python_multihop_truncated": len(python_files) > multihop_limit, "javascript_multihop_files": javascript_limit, "javascript_multihop_truncated": len(javascript_files) > javascript_limit, "go_multihop_files": go_limit, "go_multihop_truncated": len(go_files) > go_limit}
 
 
 class SemanticAnalysisAgent:
     """Prioritize hypotheses and allow automatic reproduction only for bounded safe templates."""
-    SCORES = {"command_injection": 90, "code_execution": 85, "template_injection": 80, "sql_injection": 75, "unsafe_deserialization": 70, "path_traversal": 65, "possible_ssrf": 60, "format_string": 55, "unsafe_copy": 50}
+    SCORES = {"command_injection": 90, "workflow_injection": 88, "authentication_bypass": 85, "code_execution": 85, "template_injection": 80, "sql_injection": 75, "unsafe_deserialization": 70, "toctou_candidate": 68, "path_traversal": 65, "possible_ssrf": 60, "format_string": 55, "unsafe_copy": 50}
 
     def run(self, hypotheses: list[dict], profile: dict | None = None) -> list[dict]:
         changed = (profile or {}).get("recent_changes", {}).get("files", {})
@@ -1223,7 +1307,7 @@ class ReachabilityGateAgent:
 
 class EvidenceGateAgent:
     """Apply explicit evidence gates before a private draft can be generated."""
-    HIGH_IMPACT = {"command_injection", "code_execution", "template_injection", "sql_injection", "unsafe_deserialization", "unsafe_copy", "format_string"}
+    HIGH_IMPACT = {"command_injection", "workflow_injection", "authentication_bypass", "code_execution", "template_injection", "sql_injection", "unsafe_deserialization", "unsafe_copy", "format_string"}
 
     def run(self, audit_data: dict, finding: dict, reachability: dict, evidence: dict, duplicate_review: dict) -> dict:
         trace = finding.get("trace") or []
@@ -1871,8 +1955,11 @@ class DuplicateReviewAgent:
         "sql_injection": {"SQL injection", "query injection", "CWE-89"},
         "template_injection": {"template injection", "SSTI", "CWE-1336"},
         "path_traversal": {"path traversal", "directory traversal", "CWE-22"},
+        "authentication_bypass": {"authentication bypass", "signature verification", "CWE-347"},
+        "toctou_candidate": {"TOCTOU", "race condition", "CWE-367"},
+        "workflow_injection": {"GitHub Actions", "workflow injection", "pull_request_target", "CWE-829"},
     }
-    CWE = {"command_injection": "CWE-78", "code_execution": "CWE-94", "unsafe_deserialization": "CWE-502", "possible_ssrf": "CWE-918", "sql_injection": "CWE-89", "template_injection": "CWE-1336", "path_traversal": "CWE-22"}
+    CWE = {"command_injection": "CWE-78", "workflow_injection": "CWE-829", "authentication_bypass": "CWE-347", "toctou_candidate": "CWE-367", "code_execution": "CWE-94", "unsafe_deserialization": "CWE-502", "possible_ssrf": "CWE-918", "sql_injection": "CWE-89", "template_injection": "CWE-1336", "path_traversal": "CWE-22"}
 
     def run(self, audit_data: dict, finding: dict) -> dict:
         context = audit_data.get("public_context", {})
@@ -1921,8 +2008,8 @@ class DuplicateReviewAgent:
 
 
 def _automatic_claim(finding: dict, duplicate_review: dict, reachability: dict, evidence_gate: dict) -> dict:
-    cwe = {"command_injection": "CWE-78", "code_execution": "CWE-94"}.get(finding["kind"], "CWE pending review")
-    label = {"command_injection": "Command injection", "code_execution": "Code execution"}.get(finding["kind"], finding["kind"])
+    cwe = {"command_injection": "CWE-78", "workflow_injection": "CWE-829", "authentication_bypass": "CWE-347", "toctou_candidate": "CWE-367", "code_execution": "CWE-94", "sql_injection": "CWE-89", "unsafe_deserialization": "CWE-502", "possible_ssrf": "CWE-918", "path_traversal": "CWE-22"}.get(finding["kind"], "CWE pending review")
+    label = {"command_injection": "Command injection", "workflow_injection": "Workflow trust-boundary injection", "authentication_bypass": "Authentication verification bypass", "toctou_candidate": "TOCTOU race candidate", "code_execution": "Code execution"}.get(finding["kind"], finding["kind"])
     claim = claim_template(finding)
     matches = ", ".join(item.get("id") or item.get("ghsa") or item.get("cve") or "unknown" for item in duplicate_review["matches"])
     duplicate_text = f"Potential matches require human comparison: {matches}" if matches else f'No keyword match among {duplicate_review["checked"]} collected advisories; broader manual search is still required.'

@@ -176,6 +176,36 @@ class ResearchTests(unittest.TestCase):
             self.assertEqual(len(findings), 1)
             self.assertEqual(findings[0].kind, "possible_ssrf")
 
+    def test_python_scan_detects_disabled_jwt_signature_verification(self):
+        vulnerable = Path("benchmarks/cases/python_jwt_verification_disabled")
+        verified = Path("benchmarks/cases/python_jwt_verified")
+        findings, _ = SourceScanAgent().run(vulnerable, "fixture/jwt-disabled", "d" * 40)
+        clean_findings, _ = SourceScanAgent().run(verified, "fixture/jwt-verified", "e" * 40)
+        self.assertEqual({item.kind for item in findings}, {"authentication_bypass"})
+        self.assertEqual(clean_findings, [])
+
+    def test_python_scan_detects_check_then_use_race_but_not_atomic_create(self):
+        vulnerable = Path("benchmarks/cases/python_toctou")
+        atomic = Path("benchmarks/cases/python_atomic_create")
+        findings, _ = SourceScanAgent().run(vulnerable, "fixture/toctou", "f" * 40)
+        clean_findings, _ = SourceScanAgent().run(atomic, "fixture/atomic-create", "0" * 40)
+        self.assertIn("toctou_candidate", {item.kind for item in findings})
+        self.assertEqual(clean_findings, [])
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "distinct.py").write_text('''import os\n\ndef save(source_path, destination_path):\n    if os.path.exists(source_path):\n        with open(destination_path, "w") as handle:\n            handle.write("created")\n''', encoding="utf-8")
+            distinct_findings, _ = SourceScanAgent().run(root, "fixture/distinct-paths", "3" * 40)
+            self.assertNotIn("toctou_candidate", {item.kind for item in distinct_findings})
+
+    def test_workflow_scan_detects_untrusted_pr_head_execution(self):
+        vulnerable = Path("benchmarks/cases/workflow_untrusted_pr")
+        safe = Path("benchmarks/cases/workflow_safe_pr")
+        findings, coverage = SourceScanAgent().run(vulnerable, "fixture/workflow", "1" * 40)
+        clean_findings, _ = SourceScanAgent().run(safe, "fixture/safe-workflow", "2" * 40)
+        self.assertEqual({item.kind for item in findings}, {"workflow_injection"})
+        self.assertIn("github-actions", coverage["languages"])
+        self.assertEqual(clean_findings, [])
+
     def test_repository_profile_records_packages_languages_and_entrypoints(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
