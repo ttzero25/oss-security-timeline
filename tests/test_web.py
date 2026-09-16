@@ -76,7 +76,7 @@ class DashboardTests(unittest.TestCase):
             report_folder.mkdir(parents=True)
             audit = {"repo": "example/demo", "commit": "a" * 40, "hypotheses": [{"id": finding_id, "kind": "command_injection", "path": "app.py", "sink_line": 9}]}
             (audit_folder / "audit.json").write_text(json.dumps(audit), encoding="utf-8")
-            evidence = {"finding_id": finding_id, "commit": "a" * 40, "mechanical_result": "contrast_matched", "mode": "offline_container", "validated_at": "2026-09-16T00:00:00Z"}
+            evidence = {"finding_id": finding_id, "commit": "a" * 40, "mechanical_result": "contrast_matched", "mode": "limited_process", "validated_at": "2026-09-16T00:00:00Z"}
             (report_folder / "evidence.json").write_text(json.dumps(evidence), encoding="utf-8")
             (report_folder / "GHSA_CANDIDATE.md").write_text("# Private <candidate>\n\nDo not submit automatically.", encoding="utf-8")
             (report_folder / "CVE_REQUEST_BRIEF.md").write_text("# CVE request brief\n", encoding="utf-8")

@@ -76,13 +76,13 @@ def main(argv: list[str] | None = None) -> int:
     orchestrate.add_argument("--max-candidates", type=int, default=3)
     orchestrate.add_argument("--max-pages", type=int, default=100)
     orchestrate.add_argument("--max-manifests", type=int, default=100)
-    orchestrate.add_argument("--local", action="store_true", help="격리 없이 로컬 실행: 신뢰하는 테스트 코드에만 사용")
+    orchestrate.add_argument("--container", action="store_true", help="PoC를 네트워크 차단·읽기 전용 Docker 컨테이너에서 실행")
     poc_init = commands.add_parser("poc-init", help="후보용 정상/공격 대조군 PoC 준비")
     poc_init.add_argument("audit_file", type=Path)
     poc_init.add_argument("finding_id")
-    poc_verify = commands.add_parser("poc-verify", help="완성된 PoC를 오프라인 컨테이너에서 검증")
+    poc_verify = commands.add_parser("poc-verify", help="완성된 PoC를 자원 제한 프로세스에서 검증")
     poc_verify.add_argument("manifest_file", type=Path)
-    poc_verify.add_argument("--local", action="store_true", help="격리 없이 로컬 실행: 신뢰하는 테스트 코드에만 사용")
+    poc_verify.add_argument("--container", action="store_true", help="네트워크 차단·읽기 전용 Docker 컨테이너에서 실행")
     disclosure = commands.add_parser("disclosure", help="재현 근거로 비공개 GHSA/CVE 초안 생성")
     disclosure.add_argument("audit_file", type=Path)
     disclosure.add_argument("finding_id")
@@ -120,14 +120,14 @@ def main(argv: list[str] | None = None) -> int:
                 summary = json.loads(output.read_text(encoding="utf-8"))
                 response = {"audit_file": str(output), "repo": repo, "commit": summary["commit"], "hypotheses": len(summary["hypotheses"]), "coverage": summary["coverage"]}
                 if args.command == "research-run":
-                    orchestration = ResearchOrchestrator().run(output, args.max_candidates, local=args.local)
+                    orchestration = ResearchOrchestrator().run(output, args.max_candidates, container=args.container)
                     response["orchestration_file"] = str(orchestration)
                     response["orchestration"] = json.loads(orchestration.read_text(encoding="utf-8"))
                 print(json.dumps(response, ensure_ascii=False))
             elif args.command == "poc-init":
                 print(prepare_poc(args.audit_file, args.finding_id))
             elif args.command == "poc-verify":
-                output = PocValidatorAgent().run(args.manifest_file, local=args.local)
+                output = PocValidatorAgent().run(args.manifest_file, container=args.container)
                 evidence = json.loads(output.read_text(encoding="utf-8"))
                 print(json.dumps({"evidence_file": str(output), "mechanical_result": evidence["mechanical_result"]}, ensure_ascii=False))
                 return 0 if evidence["mechanical_result"] == "contrast_matched" else 1

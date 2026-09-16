@@ -6,8 +6,10 @@ import json
 import os
 import re
 import secrets
+import signal
 import sqlite3
 import subprocess
+import sys
 import tempfile
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
@@ -251,12 +253,12 @@ class SemanticAnalysisAgent:
 
 
 class BuildEnvironmentAgent:
-    """Resolve a pinned, network-disabled runtime without installing target dependencies."""
+    """Resolve a pinned local runtime without installing target dependencies."""
     def run(self, checkout_root: Path, finding: dict) -> dict:
         if Path(finding["path"]).suffix != ".py":
             return {"status": "unsupported", "reason": "현재 자동 빌드 환경은 Python 후보만 지원합니다"}
         manifests = [name for name in ("pyproject.toml", "setup.py", "setup.cfg", "requirements.txt") if (checkout_root / name).is_file()]
-        return {"status": "ready", "runtime": "python", "image": "python:3.11-slim", "manifests": manifests, "network": "none", "repository_mount": "read_only", "dependency_install": "disabled"}
+        return {"status": "ready", "runtime": "python", "image": "python:3.11-slim", "manifests": manifests, "default_execution": "limited_process", "dependency_install": "disabled"}
 
 
 class LimitedPocAgent:
@@ -427,11 +429,26 @@ def claim_template(finding: dict) -> dict:
 
 
 class PocValidatorAgent:
-    def _run(self, command: list[str], manifest: dict, poc_dir: Path, scratch: Path, local: bool) -> dict:
+    @staticmethod
+    def _limits() -> None:
+        try:
+            import resource
+            resource.setrlimit(resource.RLIMIT_CPU, (30, 30))
+            resource.setrlimit(resource.RLIMIT_FSIZE, (16 * 1024 * 1024, 16 * 1024 * 1024))
+            resource.setrlimit(resource.RLIMIT_NOFILE, (64, 64))
+            if sys.platform.startswith("linux") and hasattr(resource, "RLIMIT_NPROC"):
+                resource.setrlimit(resource.RLIMIT_NPROC, (64, 64))
+            if sys.platform.startswith("linux") and hasattr(resource, "RLIMIT_AS"):
+                resource.setrlimit(resource.RLIMIT_AS, (1024 * 1024 * 1024, 1024 * 1024 * 1024))
+        except (ImportError, OSError, ValueError):
+            pass
+
+    def _run(self, command: list[str], manifest: dict, poc_dir: Path, scratch: Path, container: bool) -> dict:
         repo = Path(manifest["repo_path"]).resolve()
-        if local:
+        if not container:
             args = command
-            env = {**os.environ, "OSS_POC_REPO": str(repo), "OSS_POC_SCRATCH": str(scratch)}
+            env = {key: os.environ[key] for key in ("PATH", "LANG", "LC_ALL", "SYSTEMROOT") if os.environ.get(key)}
+            env.update({"OSS_POC_REPO": str(repo), "OSS_POC_SCRATCH": str(scratch), "TMPDIR": str(scratch), "PYTHONDONTWRITEBYTECODE": "1"})
         else:
             image = manifest.get("image", "python:3.11-slim")
             if not re.fullmatch(r"[A-Za-z0-9_./:-]+", image):
@@ -439,12 +456,22 @@ class PocValidatorAgent:
             args = ["docker", "run", "--rm", "--pull=never", "--network=none", "--read-only", "--pids-limit=64", "--memory=256m", "--cpus=1", "--security-opt", "no-new-privileges", "-v", f"{repo}:/repo:ro", "-v", f"{poc_dir.resolve()}:/poc:ro", "-v", f"{scratch}:/scratch:rw", "-e", "OSS_POC_REPO=/repo", "-e", "OSS_POC_SCRATCH=/scratch", "-e", "TMPDIR=/scratch", "-e", "PYTHONDONTWRITEBYTECODE=1", "-w", "/poc", image, *command]
             env = os.environ.copy()
         try:
-            result = subprocess.run(args, cwd=poc_dir if local else None, env=env, capture_output=True, text=True, timeout=min(int(manifest.get("timeout_seconds", 30)), 120))
-            return {"returncode": result.returncode, "stdout": result.stdout[:4000], "stderr": result.stderr[:4000], "timed_out": False}
+            limit_process = not container and sys.platform.startswith("linux")
+            process = subprocess.Popen(args, cwd=None if container else poc_dir, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True, preexec_fn=self._limits if limit_process else None)
+            stdout, stderr = process.communicate(timeout=min(int(manifest.get("timeout_seconds", 30)), 120))
+            return {"returncode": process.returncode, "stdout": stdout[:4000], "stderr": stderr[:4000], "timed_out": False}
         except subprocess.TimeoutExpired as exc:
-            return {"returncode": None, "stdout": str(exc.stdout or "")[:4000], "stderr": str(exc.stderr or "")[:4000], "timed_out": True}
+            if "process" in locals() and process.poll() is None:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except (OSError, AttributeError):
+                    process.kill()
+                stdout, stderr = process.communicate()
+            else:
+                stdout, stderr = str(exc.stdout or ""), str(exc.stderr or "")
+            return {"returncode": None, "stdout": str(stdout or "")[:4000], "stderr": str(stderr or "")[:4000], "timed_out": True}
 
-    def run(self, manifest_file: Path, local: bool = False) -> Path:
+    def run(self, manifest_file: Path, container: bool = False) -> Path:
         manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
         poc_dir = manifest_file.parent.resolve()
         repo = Path(manifest["repo_path"]).resolve()
@@ -460,12 +487,12 @@ class PocValidatorAgent:
             attack_scratch = Path(temporary) / "attack"
             control_scratch.mkdir()
             attack_scratch.mkdir()
-            control = self._run(manifest["control"], manifest, poc_dir, control_scratch, local)
-            attack = self._run(manifest["attack"], manifest, poc_dir, attack_scratch, local)
+            control = self._run(manifest["control"], manifest, poc_dir, control_scratch, container)
+            attack = self._run(manifest["attack"], manifest, poc_dir, attack_scratch, container)
         control_match = marker in control["stdout"]
         attack_match = marker in attack["stdout"]
         confirmed = attack_match and not control_match and attack["returncode"] == 0 and control["returncode"] == 0 and not attack["timed_out"] and not control["timed_out"]
-        evidence = {"finding_id": manifest["finding_id"], "repo_path": str(repo), "commit": manifest["commit"], "proof_sha256": hashlib.sha256((poc_dir / "proof.py").read_bytes()).hexdigest(), "manifest_sha256": hashlib.sha256(manifest_file.read_bytes()).hexdigest(), "mode": "local" if local else "offline_container", "control": control, "attack": attack, "control_observable": control_match, "attack_observable": attack_match, "mechanical_result": "contrast_matched" if confirmed else "not_confirmed", "validated_at": datetime.now(timezone.utc).isoformat(), "note": "기계적 관측 결과입니다. 코드 경로와 보안 영향은 별도로 검토해야 합니다."}
+        evidence = {"finding_id": manifest["finding_id"], "repo_path": str(repo), "commit": manifest["commit"], "proof_sha256": hashlib.sha256((poc_dir / "proof.py").read_bytes()).hexdigest(), "manifest_sha256": hashlib.sha256(manifest_file.read_bytes()).hexdigest(), "mode": "offline_container" if container else "limited_process", "control": control, "attack": attack, "control_observable": control_match, "attack_observable": attack_match, "mechanical_result": "contrast_matched" if confirmed else "not_confirmed", "validated_at": datetime.now(timezone.utc).isoformat(), "note": "기계적 관측 결과입니다. 로컬 제한 프로세스는 컨테이너 수준의 파일·네트워크 격리를 제공하지 않으며 코드 경로와 보안 영향은 별도로 검토해야 합니다."}
         output = poc_dir / "evidence.json"
         output.write_text(json.dumps(evidence, ensure_ascii=False, indent=2), encoding="utf-8")
         return output
@@ -549,7 +576,7 @@ Upstream guards and rebuttal checks: {claim["upstream_guard_analysis"]}
 
 ## Proof of concept
 
-The normal/attack PoC contrast matched against the checkout at `{audit_data["commit"]}`. PoC files: `{claim_file.parent / "proof.py"}` and `{claim_file.parent / "manifest.json"}`. Run `python3 -m oss_timeline poc-verify {claim_file.parent / "manifest.json"}` in an offline container.
+The normal/attack PoC contrast matched against the checkout at `{audit_data["commit"]}`. PoC files: `{claim_file.parent / "proof.py"}` and `{claim_file.parent / "manifest.json"}`. Run `python3 -m oss_timeline poc-verify {claim_file.parent / "manifest.json"}` with the limited local runner, or add `--container` for stronger isolation.
 
 {steps}
 
@@ -641,7 +668,7 @@ def _automatic_claim(finding: dict, duplicate_review: dict) -> dict:
         "upstream_guard_analysis": "The bounded semantic scan found no supported guard on this source-to-sink path. A maintainer must review framework middleware and callers.",
         "negative_control_explanation": "The benign input completed without the unique attack marker; only the crafted input produced it.",
         "remediation": "Avoid interpreting attacker-controlled text as code or a shell command; use fixed operations and validated structured arguments.",
-        "reproduction_steps": ["Use the pinned analyzed commit", "Run the supplied offline-container PoC verifier", "Compare benign and crafted observations"],
+        "reproduction_steps": ["Use the pinned analyzed commit", "Run the supplied resource-limited PoC verifier", "Compare benign and crafted observations"],
     })
     claim["affected"] = {"ecosystem": "source", "package": finding["repo"], "versions": f'analyzed commit {finding["commit"]}', "patched_version": "Not yet available"}
     claim["source"]["attacker_control"] = "The scanner traced this expression from a modeled request, CLI, or route input."
@@ -657,7 +684,7 @@ def _automatic_claim(finding: dict, duplicate_review: dict) -> dict:
 
 class ResearchOrchestrator:
     """Run bounded reproduction stages and leave all external report submission to a human."""
-    def run(self, audit_file: Path, max_candidates: int = 3, local: bool = False) -> Path:
+    def run(self, audit_file: Path, max_candidates: int = 3, container: bool = False) -> Path:
         audit_data = json.loads(audit_file.read_text(encoding="utf-8"))
         ranked = SemanticAnalysisAgent().run(audit_data.get("hypotheses", []))
         results = []
@@ -689,7 +716,7 @@ class ResearchOrchestrator:
                     manifest_file = LimitedPocAgent().run(audit_file, finding, environment)
                     generation_status = "generated"
                 result["stages"]["poc_generation"] = {"status": generation_status, "manifest": str(manifest_file)}
-                evidence_file = PocValidatorAgent().run(manifest_file, local=local)
+                evidence_file = PocValidatorAgent().run(manifest_file, container=container)
                 evidence = json.loads(evidence_file.read_text(encoding="utf-8"))
                 result["stages"]["isolated_contrast"] = {"status": evidence["mechanical_result"], "mode": evidence["mode"], "evidence": str(evidence_file)}
                 if evidence["mechanical_result"] != "contrast_matched":
@@ -715,7 +742,7 @@ class ResearchOrchestrator:
             "repo": audit_data["repo"],
             "commit": audit_data["commit"],
             "audit_file": str(audit_file),
-            "execution_mode": "local_explicit" if local else "offline_container",
+            "execution_mode": "offline_container" if container else "limited_process",
             "external_submission": "disabled_manual_only",
             "ranked_candidates": len(ranked),
             "processed_candidates": len(results),

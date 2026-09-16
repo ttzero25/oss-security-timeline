@@ -14,7 +14,7 @@ GitHub 오픈소스 저장소의 변경과 공개 취약점 공지를 한 시간
 - Research Orchestrator는 후보 우선순위화, 제한된 Python 코드 실행 후보의 실제 함수 호출 PoC 생성, 격리 대조 실행, 수집된 공개 공지 중복 점검을 연결합니다. 모든 게이트를 통과한 결과만 제보 **초안**으로 만들며 외부 제출과 CVE/GHSA 번호 부여는 자동으로 하지 않습니다.
 - 로컬 웹의 Home에서 누적 탐지와 에이전트 역할을, 실험실에서 저장소별 조사 상태를, 정리에서 OSS별 요약을 확인할 수 있습니다. 관계망은 데이터 연결을, 리포트는 CLI에서 생성된 검증 결과와 비공개 초안을 읽기 전용으로 보여줍니다.
 
-Python 3.11 이상이 필요합니다. 기본 CLI와 웹 화면에는 추가 Python 패키지가 필요하지 않습니다. 웹은 `GITHUB_TOKEN`이 없으면 설치·로그인된 GitHub CLI의 인증을 메모리에서만 활용합니다. 어느 쪽도 없으면 비인증 API 한도가 적용되므로 읽기용 토큰을 권장합니다. PoC의 기본 격리 실행에는 Docker 데몬과 미리 준비된 컨테이너 이미지가 필요합니다.
+Python 3.11 이상이 필요합니다. 기본 CLI와 웹 화면에는 추가 Python 패키지나 Docker가 필요하지 않습니다. 웹은 `GITHUB_TOKEN`이 없으면 설치·로그인된 GitHub CLI의 인증을 메모리에서만 활용합니다. 어느 쪽도 없으면 비인증 API 한도가 적용되므로 읽기용 토큰을 권장합니다. 더 강한 PoC 격리가 필요할 때만 Docker와 `--container`를 사용합니다.
 
 ## 신규 팀원을 위한 빠른 시작
 
@@ -50,13 +50,13 @@ Python 3.11 이상이 필요합니다. 기본 CLI와 웹 화면에는 추가 Pyt
 
 `python3 -m oss_timeline audit https://github.com/owner/repo`는 공개 저장소의 최신 커밋을 새 로컬 디렉터리에 복제해 코드 가설을 `data/research/`에 기록합니다. 로컬 체크아웃은 `python3 -m oss_timeline audit /path/to/checkout --repo owner/repo`로 조사할 수 있습니다. 출력된 `audit.json`에서 후보 ID와 조사 범위를 확인합니다.
 
-지원되는 제한 자동화는 아래 명령으로 실행합니다. URL을 입력하면 먼저 공개 공지를 갱신해 중복 검토 스냅샷을 만든 뒤 코드를 조사합니다. 기본 PoC 실행은 네트워크가 차단되고 저장소가 읽기 전용으로 마운트된 컨테이너입니다. 안전한 자동 재현 템플릿이 없는 후보는 억지로 실행하지 않고 `orchestration.json`에 중단 사유를 남깁니다. `--local`은 테스트 픽스처처럼 신뢰하는 코드에만 사용합니다.
+지원되는 제한 자동화는 아래 명령으로 실행합니다. URL을 입력하면 먼저 공개 공지를 갱신해 중복 검토 스냅샷을 만든 뒤 코드를 조사합니다. 기본 PoC는 별도 임시 작업공간, 제한된 환경 변수, 실행 시간·출력 제한을 둔 로컬 subprocess에서 실행하며 Linux에서는 추가 OS 자원 한도를 적용합니다. 이 방식은 컨테이너 수준의 파일·네트워크 격리는 아니므로 더 강한 격리가 필요하면 `--container`를 추가합니다. 안전한 자동 재현 템플릿이 없는 후보는 억지로 실행하지 않고 `orchestration.json`에 중단 사유를 남깁니다.
 
 ```sh
 python3 -m oss_timeline research-run https://github.com/owner/repo --max-candidates 3
 ```
 
-후보가 남으면 `poc-init`으로 `proof.py`, `manifest.json`, `claim.example.json`을 준비합니다. 조사한 커밋의 **실제 앱 경로**를 호출하도록 PoC를 완성하고, 정상 입력 대조군과 보안 영향을 명시한 `claim.json`을 작성하세요. `poc-verify`는 기본적으로 네트워크가 없는 읽기 전용 컨테이너에서 두 입력을 실행합니다. `--local`은 신뢰할 수 있는 테스트 코드에만 사용합니다. 재현 결과와 코드 인용이 같은 커밋에 맞고, 기존 공지 조사 근거가 채워지면 `disclosure`가 `GHSA_CANDIDATE.md`와 `CVE_REQUEST_BRIEF.md`를 만듭니다.
+후보가 남으면 `poc-init`으로 `proof.py`, `manifest.json`, `claim.example.json`을 준비합니다. 조사한 커밋의 **실제 앱 경로**를 호출하도록 PoC를 완성하고, 정상 입력 대조군과 보안 영향을 명시한 `claim.json`을 작성하세요. `poc-verify`는 기본적으로 자원 제한 로컬 subprocess에서 두 입력을 실행합니다. 네트워크 차단과 읽기 전용 저장소 마운트가 필요하면 `--container`를 사용합니다. 재현 결과와 코드 인용이 같은 커밋에 맞고, 기존 공지 조사 근거가 채워지면 `disclosure`가 `GHSA_CANDIDATE.md`와 `CVE_REQUEST_BRIEF.md`를 만듭니다.
 
 ```sh
 python3 -m oss_timeline poc-init path/to/audit.json FIND-XXXXXXXXXXXX
@@ -75,7 +75,7 @@ python3 -m oss_timeline disclosure path/to/audit.json FIND-XXXXXXXXXXXX \
 | [agents](agents/README.md) | 8개 역할별 입력·출력과 실행 흐름 |
 | [tools](tools/README.md) | CLI 안내와 로컬 수집·조회 웹 도구 |
 | [rules](rules/README.md) | 코드 탐지, PoC 검증, 비공개 제보 기준 |
-| [troubleshooting](troubleshooting/README.md) | API 제한·Docker·수집 누락 등의 해결 방법 |
+| [troubleshooting](troubleshooting/README.md) | API 제한·PoC 실행·수집 누락 등의 해결 방법 |
 | `oss_timeline/` | 실행 코드와 SQLite 저장·보고서 생성 |
 | `tests/` | 수집·중복 제거·PoC·제보 게이트 회귀 검사 |
 | `data/` | 실행 중 생성되는 DB, 복제본, PoC, 비공개 초안; Git 제외 |
