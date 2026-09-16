@@ -1212,18 +1212,31 @@ def _go_multihop_hypotheses(files: list[Path], root: Path, repo: str, commit: st
         if directory == ".":
             directory = ""
         imports: dict[str, str] = {}
+        package_imports: dict[str, str] = {}
+        import_block = False
         for line in lines:
-            match = re.match(r'^\s*(?:([A-Za-z_]\w*)\s+)?"([^"]+)"\s*$', line)
-            if not match:
-                match = re.search(r'\bimport\s+(?:([A-Za-z_]\w*)\s+)?"([^"]+)"', line)
-            if not match:
+            stripped = line.strip()
+            if stripped.startswith("import ("):
+                import_block = True
+                payload = stripped[len("import "):]
+            elif stripped.startswith("import "):
+                payload = stripped[len("import "):]
+            elif import_block:
+                payload = stripped
+            else:
                 continue
-            imported = match.group(2)
-            if module_path and (imported == module_path or imported.startswith(module_path + "/")):
-                local = imported[len(module_path):].lstrip("/")
-                imports[match.group(1) or imported.rsplit("/", 1)[-1]] = local
+            if ")" in payload:
+                import_block = False
+            for match in re.finditer(r'(?:([A-Za-z_]\w*|[._])\s+)?"([^"]+)"', payload):
+                imported = match.group(2)
+                alias = match.group(1) or imported.rsplit("/", 1)[-1]
+                if alias not in {"_", "."}:
+                    package_imports[alias] = imported
+                if module_path and alias not in {"_", "."} and (imported == module_path or imported.startswith(module_path + "/")):
+                    local = imported[len(module_path):].lstrip("/")
+                    imports[alias] = local
         path = filename.relative_to(root).as_posix()
-        record = {"path": path, "lines": lines, "directory": directory, "imports": imports}
+        record = {"path": path, "lines": lines, "directory": directory, "imports": imports, "package_imports": package_imports}
         file_records.append(record)
         for block in _go_function_blocks(lines):
             functions[f'{directory}:{block["name"]}'] = {**record, **block}
@@ -1236,24 +1249,30 @@ def _go_multihop_hypotheses(files: list[Path], root: Path, repo: str, commit: st
         local = f'{info["directory"]}:{name}'
         return local if local in functions else None
 
-    def sink_for(line: str) -> tuple[str, str] | None:
+    def imported_call(info: dict, package: str, functions: str, line: str, shadowed: set[str]) -> re.Match | None:
+        aliases = [alias for alias, imported in info["package_imports"].items() if imported == package and alias not in shadowed]
+        if not aliases:
+            return None
+        return re.search(rf"\b(?:{'|'.join(map(re.escape, aliases))})\.(?:{functions})\s*\((.*)", line)
+
+    def sink_for(info: dict, line: str, shadowed: set[str]) -> tuple[str, str] | None:
         unverified = re.search(r"\b(?:[A-Za-z_]\w*\.)?ParseUnverified\s*\((.*)", line)
         if unverified:
             arguments = _go_arguments(unverified.group(1))
             if arguments:
                 return "authentication_bypass", arguments[0]
-        shell = re.search(r"\bexec\.Command(?:Context)?\s*\((.*)", line)
+        shell = imported_call(info, "os/exec", r"Command(?:Context)?", line, shadowed)
         if shell:
             arguments = _go_arguments(shell.group(1))
             offset = 1 if "CommandContext" in shell.group(0) else 0
             if len(arguments) >= offset + 3 and arguments[offset].strip('`"') in {"sh", "/bin/sh", "bash", "/bin/bash"} and arguments[offset + 1].strip('`"') in {"-c", "-lc"}:
                 return "command_injection", arguments[offset + 2]
-        request = re.search(r"\bhttp\.(?:Get|Post|Head)\s*\((.*)", line)
+        request = imported_call(info, "net/http", r"Get|Post|Head", line, shadowed)
         if request:
             arguments = _go_arguments(request.group(1))
             if arguments:
                 return "possible_ssrf", arguments[0]
-        new_request = re.search(r"\bhttp\.NewRequest(?:WithContext)?\s*\((.*)", line)
+        new_request = imported_call(info, "net/http", r"NewRequest(?:WithContext)?", line, shadowed)
         if new_request:
             arguments = _go_arguments(new_request.group(1))
             url_index = 2 if "WithContext" in new_request.group(0) else 1
@@ -1265,7 +1284,7 @@ def _go_multihop_hypotheses(files: list[Path], root: Path, repo: str, commit: st
             query_index = 1 if sql.group(1) else 0
             if len(arguments) > query_index and not arguments[query_index].lstrip().startswith(('"', '`')):
                 return "sql_injection", arguments[query_index]
-        filesystem = re.search(r"\bos\.(?:Open|ReadFile|WriteFile|Create)\s*\((.*)", line)
+        filesystem = imported_call(info, "os", r"Open|ReadFile|WriteFile|Create", line, shadowed)
         if filesystem:
             arguments = _go_arguments(filesystem.group(1))
             if arguments:
@@ -1276,8 +1295,14 @@ def _go_multihop_hypotheses(files: list[Path], root: Path, repo: str, commit: st
         external = set(info.get("external_parameters", []))
         origins = {name: ("__external__" if name in external else name, info["start"] + 1, info["lines"][info["start"]]) for name in info["parameters"]}
         sinks, calls = [], []
+        shadowed = set(info["parameters"]) & set(info["package_imports"])
         for offset in range(info["start"], info["end"] + 1):
             line, number = info["lines"][offset], offset + 1
+            local_declaration = re.search(r"\b([A-Za-z_]\w*)\s*:=|\bvar\s+([A-Za-z_]\w*)\b", line)
+            if local_declaration:
+                local_name = local_declaration.group(1) or local_declaration.group(2)
+                if local_name in info["package_imports"]:
+                    shadowed.add(local_name)
             assignment = re.search(r"\b([A-Za-z_]\w*)\s*(?::=|=)\s*(.+)", line)
             if assignment:
                 value = assignment.group(2)
@@ -1287,7 +1312,7 @@ def _go_multihop_hypotheses(files: list[Path], root: Path, repo: str, commit: st
                     inherited = next((origins[name] for name in _go_refs(value) if name in origins), None)
                     if inherited:
                         origins[assignment.group(1)] = inherited
-            sink = sink_for(line)
+            sink = sink_for(info, line, shadowed)
             if sink:
                 kind, argument = sink
                 origin = ("__external__", number, line) if GO_SOURCE.search(argument) else next((origins[name] for name in _go_refs(argument) if name in origins), None)
@@ -1432,7 +1457,7 @@ class SourceScanAgent:
         output.extend(_python_multihop_hypotheses(python_files[:multihop_limit], root, repo, commit))
         output.extend(_javascript_multihop_hypotheses(javascript_files[:javascript_limit], root, repo, commit))
         output.extend(_go_multihop_hypotheses(go_files[:go_limit], root, repo, commit))
-        return sorted({x.id: x for x in output}.values(), key=lambda x: (x.path, x.sink_line)), {"files_inspected": len(selected_files), "eligible_files": len(supported_files), "files_skipped_by_limit": len(supported_files) - len(selected_files), "truncated": truncated, "priority_files_requested": len(priority_paths), "priority_files_scanned": priority_scanned, "selection_strategy": "recent_changes_first_then_path", "languages": ["python", "javascript/typescript", "go", "c/c++", "github-actions"], "python_multihop_files": multihop_limit, "python_multihop_truncated": len(python_files) > multihop_limit, "javascript_multihop_files": javascript_limit, "javascript_multihop_truncated": len(javascript_files) > javascript_limit, "go_multihop_files": go_limit, "go_multihop_truncated": len(go_files) > go_limit}
+        return sorted({x.id: x for x in output}.values(), key=lambda x: (x.path, x.sink_line)), {"files_inspected": len(selected_files), "eligible_files": len(supported_files), "files_skipped_by_limit": len(supported_files) - len(selected_files), "truncated": truncated, "priority_files_requested": len(priority_paths), "priority_files_scanned": priority_scanned, "selection_strategy": "recent_changes_first_then_path", "languages": ["python", "javascript/typescript", "go", "c/c++", "github-actions"], "python_multihop_files": multihop_limit, "python_multihop_truncated": len(python_files) > multihop_limit, "javascript_multihop_files": javascript_limit, "javascript_multihop_truncated": len(javascript_files) > javascript_limit, "go_multihop_files": go_limit, "go_multihop_truncated": len(go_files) > go_limit, "go_symbol_resolution": "import_path_alias_and_conservative_shadowing"}
 
 
 class SemanticAnalysisAgent:

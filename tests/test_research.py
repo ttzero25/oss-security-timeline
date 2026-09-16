@@ -176,6 +176,17 @@ class ResearchTests(unittest.TestCase):
             self.assertEqual(len(findings), 1)
             self.assertEqual(findings[0].kind, "possible_ssrf")
 
+    def test_go_scan_resolves_standard_library_aliases_and_shadowing(self):
+        command_findings, coverage = SourceScanAgent().run(Path("benchmarks/cases/go_alias_command"), "fixture/go-alias-command", "d" * 40)
+        ssrf_findings, _ = SourceScanAgent().run(Path("benchmarks/cases/go_alias_ssrf"), "fixture/go-alias-ssrf", "e" * 40)
+        shadowed_findings, _ = SourceScanAgent().run(Path("benchmarks/cases/go_shadowed_exec"), "fixture/go-shadowed", "f" * 40)
+        unrelated_findings, _ = SourceScanAgent().run(Path("benchmarks/cases/go_unrelated_http"), "fixture/go-unrelated", "0" * 40)
+        self.assertIn("command_injection", {item.kind for item in command_findings})
+        self.assertIn("possible_ssrf", {item.kind for item in ssrf_findings})
+        self.assertEqual(shadowed_findings, [])
+        self.assertEqual(unrelated_findings, [])
+        self.assertEqual(coverage["go_symbol_resolution"], "import_path_alias_and_conservative_shadowing")
+
     def test_python_scan_detects_disabled_jwt_signature_verification(self):
         vulnerable = Path("benchmarks/cases/python_jwt_verification_disabled")
         verified = Path("benchmarks/cases/python_jwt_verified")
