@@ -34,6 +34,7 @@ AGENT_DESCRIPTIONS = {
     "ReachabilityGateAgent": "기본 설정의 외부 엔트리포인트에서 후보 경로 도달 여부 검증",
     "ResearchOrchestrator": "후보 우선순위화와 제한된 격리 재현 단계 조율",
     "PocValidatorAgent": "정상·공격 입력의 격리 PoC 결과 대조",
+    "DuplicateReviewAgent": "동일 저장소·패키지 공지와 과거 보안 변경 중복 검토",
     "EvidenceGateAgent": "도달성·기본 설정·입력 통제·영향·중복의 5개 근거 판정",
     "DisclosureAgent": "검증 근거에 기반한 비공개 제보 초안 생성",
 }
@@ -206,11 +207,11 @@ def load_jobs(path: Path) -> dict[str, dict]:
             valid = repo_name(repo) == repo
         except (ValueError, TypeError):
             continue
-        if valid and isinstance(job, dict) and job.get("status") in {"running", "complete", "failed"}:
+        if valid and isinstance(job, dict) and job.get("status") in {"running", "queued", "complete", "failed"}:
             jobs[repo] = job
     for job in jobs.values():
         if job["status"] == "running":
-            job.update(status="failed", step="중단됨", error="서버 재시작으로 조사가 중단됐습니다. 다시 시작하세요.")
+            job.update(status="queued", step="서버 재시작 후 재개 대기", error="")
     return jobs
 
 
@@ -633,8 +634,27 @@ def serve(port: int, db_path: Path, research_root: Path, registry_path: Path) ->
                 persist_jobs()
         except (ApiError, ValueError, RuntimeError, OSError, KeyError) as exc:
             with lock:
-                jobs[repo].update(status="failed", step="실패", error=str(exc)[-400:])
+                attempts = int(jobs[repo].get("attempts", 1))
+                if isinstance(exc, (ApiError, OSError, RuntimeError)) and attempts < 3:
+                    jobs[repo].update(status="running", step=f"일시 실패 · 자동 재시도 {attempts + 1}/3 대기", error=str(exc)[-400:], attempts=attempts + 1)
+                    retry = True
+                else:
+                    jobs[repo].update(status="failed", step="실패", error=str(exc)[-400:], attempts=attempts)
+                    retry = False
                 persist_jobs()
+            if retry:
+                timer = threading.Timer(min(8, 2 ** attempts), run_job, args=(repo,))
+                timer.daemon = True
+                timer.start()
+
+    with lock:
+        queued = [repo for repo, job in jobs.items() if job.get("status") == "queued"]
+        for repo in queued:
+            jobs[repo].update(status="running", step="서버 재시작 후 조사 재개", attempts=int(jobs[repo].get("attempts", 1)))
+        if queued:
+            persist_jobs()
+    for repo in queued:
+        threading.Thread(target=run_job, args=(repo,), daemon=True).start()
 
     class Handler(BaseHTTPRequestHandler):
         def respond(self, body: str, status: int = 200, content_type: str = "text/html; charset=utf-8", location: str | None = None) -> None:
@@ -744,7 +764,7 @@ def serve(port: int, db_path: Path, research_root: Path, registry_path: Path) ->
                 if any(x["status"] == "running" for x in jobs.values()):
                     self.respond(page("진행 중", "lab", empty("다른 조사가 진행 중입니다. 완료 후 다시 시도하세요.")), status=409)
                     return
-                jobs[repo] = {"repo": repo, "status": "running", "step": "조사 대기 중", "started_at": datetime.now(timezone.utc).isoformat()}
+                jobs[repo] = {"repo": repo, "status": "running", "step": "조사 대기 중", "started_at": datetime.now(timezone.utc).isoformat(), "attempts": 1, "max_attempts": 3, "resume_on_restart": True}
                 persist_jobs()
             threading.Thread(target=run_job, args=(repo,), daemon=True).start()
             self.respond("", status=303, location="/lab?repo=" + quote(repo))

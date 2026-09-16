@@ -81,13 +81,13 @@ class DashboardTests(unittest.TestCase):
         self.assertIn("SSRF · 네트워크 스텁", rendered)
         self.assertIn("경로 조작 · scratch", rendered)
 
-    def test_restart_marks_running_job_interrupted(self):
+    def test_restart_queues_running_job_for_resume(self):
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / "jobs.json"
             path.write_text(json.dumps({"example/demo": {"status": "running", "step": "collecting"}}), encoding="utf-8")
             jobs = load_jobs(path)
-            self.assertEqual(jobs["example/demo"]["status"], "failed")
-            self.assertIn("중단", jobs["example/demo"]["error"])
+            self.assertEqual(jobs["example/demo"]["status"], "queued")
+            self.assertIn("재개", jobs["example/demo"]["step"])
             self.assertEqual(fix_index(Path(temp), "example/demo")["comparisons"], [])
 
     def test_reconciles_legacy_orchestration_without_rerunning_it(self):

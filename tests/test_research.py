@@ -702,6 +702,22 @@ print(result.stdout)
             self.assertEqual(context["status"], "snapshot")
             self.assertEqual(context["known_advisories"][0]["id"], "GHSA-aaaa-bbbb-cccc")
 
+    def test_public_context_includes_advisory_for_matching_package_in_other_repo(self):
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)
+            repo = self._checkout(folder)
+            database = folder / "timeline.sqlite3"
+            store = Store(database)
+            source = Collection("source/project", packages=[("npm", "shared-package", "package.json")], advisories=[{"id": "GHSA-aaaa-bbbb-dddd", "ghsa": "GHSA-aaaa-bbbb-dddd", "cve": None, "published_at": "2026-01-01T00:00:00Z", "modified_at": None, "summary": "Shared package command injection", "severity": "high", "cvss": None, "url": None, "source": "GitHub", "affected": [{"ecosystem": "npm", "name": "shared-package", "range": "<2", "patched": "2"}]}])
+            target = Collection("target/project", packages=[("npm", "shared-package", "package.json")])
+            store.save(source)
+            store.save(target)
+            store.db.close()
+            audit_file = audit(repo, "target/project", folder / "research", timeline_db=database)
+            context = json.loads(audit_file.read_text())["public_context"]
+            self.assertEqual(context["advisory_scope"], "repository_and_matching_packages")
+            self.assertEqual(context["known_advisories"][0]["id"], "GHSA-aaaa-bbbb-dddd")
+
     def test_orchestrator_generates_bounded_poc_and_manual_only_drafts(self):
         with tempfile.TemporaryDirectory() as temp:
             folder = Path(temp)
@@ -803,6 +819,14 @@ print(result.stdout)
     def test_duplicate_review_rejects_stale_snapshot(self):
         review = DuplicateReviewAgent().run({"public_context": {"status": "snapshot", "fresh": False, "snapshot_age_hours": 200, "known_advisories": []}}, {"kind": "command_injection"})
         self.assertEqual(review["status"], "stale_public_context")
+
+    def test_duplicate_review_flags_matching_prior_security_change(self):
+        audit_data = {"public_context": {"status": "snapshot", "fresh": True, "known_advisories": [], "security_change_signals": [{"id": "commit:abc", "title": "Prevent command injection in runner", "reasons": ["security fix"], "paths": ["service/runner.py"], "evidence": []}]}}
+        finding = {"kind": "command_injection", "function": "execute_job", "path": "service/runner.py", "source_path": "service/api.py", "sink_path": "service/runner.py"}
+        review = DuplicateReviewAgent().run(audit_data, finding)
+        self.assertEqual(review["status"], "possible_duplicate")
+        self.assertEqual(review["classification"], "possible_prior_fix")
+        self.assertEqual(review["matches"][0]["relation"], "possible_prior_fix")
 
     def test_orchestrator_reproduces_cross_module_route_trace(self):
         with tempfile.TemporaryDirectory() as temp:

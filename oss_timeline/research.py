@@ -2531,11 +2531,23 @@ def _public_context(timeline_db: Path | None, repo: str) -> dict:
         connection = sqlite3.connect(f"file:{timeline_db.resolve()}?mode=ro", uri=True)
         connection.row_factory = sqlite3.Row
         row = connection.execute("SELECT last_sync,coverage FROM repositories WHERE name=?", (repo,)).fetchone()
-        known = [dict(x) for x in connection.execute("SELECT a.id,a.ghsa,a.cve,a.summary,a.published_at,a.modified_at,a.cwe_ids,a.url,a.sources,a.references_json FROM advisories a JOIN advisory_repos ar ON ar.advisory_id=a.id WHERE ar.repo=? ORDER BY a.published_at DESC", (repo,))]
+        known = [dict(x) for x in connection.execute("""SELECT DISTINCT a.id,a.ghsa,a.cve,a.summary,a.published_at,a.modified_at,a.cwe_ids,a.url,a.sources,a.references_json
+            FROM advisories a JOIN advisory_repos ar ON ar.advisory_id=a.id
+            WHERE ar.repo=? OR EXISTS (
+                SELECT 1 FROM advisory_packages ap JOIN packages p ON p.ecosystem=ap.ecosystem AND p.name=ap.name
+                WHERE ap.advisory_id=a.id AND p.repo=?
+            ) ORDER BY a.published_at DESC""", (repo, repo))]
         for advisory in known:
             advisory["cwe_ids"] = json.loads(advisory.get("cwe_ids") or "[]")
             advisory["references"] = json.loads(advisory.pop("references_json", "[]") or "[]")
-            advisory["packages"] = [dict(item) for item in connection.execute("SELECT ecosystem,name,version_range,patched FROM advisory_packages WHERE advisory_id=? AND repo=?", (advisory["id"], repo))]
+            advisory["packages"] = [dict(item) for item in connection.execute("SELECT DISTINCT ecosystem,name,version_range,patched FROM advisory_packages WHERE advisory_id=?", (advisory["id"],))]
+        signals = [dict(item) for item in connection.execute("SELECT id,at,title,url,reasons,paths,evidence,status FROM findings WHERE repo=? ORDER BY at DESC LIMIT 500", (repo,))]
+        for signal_item in signals:
+            for key in ("reasons", "paths", "evidence"):
+                try:
+                    signal_item[key] = json.loads(signal_item.get(key) or "[]")
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    signal_item[key] = []
         connection.close()
         age_hours = None
         if row and row["last_sync"]:
@@ -2544,7 +2556,7 @@ def _public_context(timeline_db: Path | None, repo: str) -> dict:
                 age_hours = round((datetime.now(timezone.utc) - synchronized).total_seconds() / 3600, 2)
             except ValueError:
                 pass
-        return {"status": "snapshot" if row else "repo_not_synced", "last_sync": row["last_sync"] if row else None, "snapshot_age_hours": age_hours, "fresh": age_hours is not None and age_hours <= 168, "coverage": json.loads(row["coverage"]) if row else {}, "known_advisories": known}
+        return {"status": "snapshot" if row else "repo_not_synced", "last_sync": row["last_sync"] if row else None, "snapshot_age_hours": age_hours, "fresh": age_hours is not None and age_hours <= 168, "coverage": json.loads(row["coverage"]) if row else {}, "known_advisories": known, "security_change_signals": signals, "advisory_scope": "repository_and_matching_packages"}
     except sqlite3.DatabaseError:
         return {"status": "unreadable", "known_advisories": []}
 
@@ -2974,12 +2986,23 @@ class DuplicateReviewAgent:
                 relation = "known_duplicate" if score >= 6 else "possible_variant"
                 matches.append({**{key: advisory.get(key) for key in ("id", "ghsa", "cve", "summary", "sources", "cwe_ids", "packages", "references")}, "score": score, "relation": relation, "reasons": reasons})
         matches.sort(key=lambda item: (-item["score"], str(item.get("id") or "")))
+        signal_matches = []
+        for signal_item in context.get("security_change_signals", []):
+            haystack = " ".join([str(signal_item.get("title") or ""), *map(str, signal_item.get("reasons") or []), *map(str, signal_item.get("paths") or []), *map(str, signal_item.get("evidence") or [])]).lower()
+            matched_terms = sorted(term for term in terms if term and term.lower() in haystack)
+            matched_tokens = sorted(token for token in code_tokens if token in haystack)
+            score = (2 if matched_terms else 0) + min(4, len(matched_tokens) * 2)
+            if score >= 4:
+                signal_matches.append({"id": signal_item.get("id"), "summary": signal_item.get("title"), "url": signal_item.get("url"), "score": score, "relation": "possible_prior_fix", "reasons": (["취약점 유형 용어: " + ", ".join(matched_terms)] if matched_terms else []) + (["코드 경로/함수 토큰: " + ", ".join(matched_tokens)] if matched_tokens else [])})
+        signal_matches.sort(key=lambda item: (-item["score"], str(item.get("id") or "")))
+        all_matches = sorted([*matches, *signal_matches], key=lambda item: (-item["score"], str(item.get("id") or "")))
         return {
-            "status": "possible_duplicate" if matches else "no_match_in_collected_snapshot",
-            "classification": "known_duplicate" if any(item["relation"] == "known_duplicate" for item in matches) else "possible_variant" if matches else "no_structured_match",
+            "status": "possible_duplicate" if all_matches else "no_match_in_collected_snapshot",
+            "classification": "known_duplicate" if any(item["relation"] == "known_duplicate" for item in matches) else "possible_prior_fix" if signal_matches else "possible_variant" if matches else "no_structured_match",
             "checked": len(advisories),
-            "matches": matches[:20],
-            "scope": "수집된 GitHub·OSV 공개 공지 스냅샷",
+            "security_change_signals_checked": len(context.get("security_change_signals", [])),
+            "matches": all_matches[:20],
+            "scope": "저장소 및 동일 패키지의 GitHub·OSV 공개 공지와 과거 보안 변경 신호",
             "snapshot_age_hours": context.get("snapshot_age_hours"),
             "manual_review_required": True,
         }
