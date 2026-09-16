@@ -191,7 +191,8 @@ def lab(selected: str | None, report: dict | None, audits: list[dict], job: dict
         hypotheses = audit_result["hypotheses"] if audit_result else []
         code_coverage = audit_result.get("coverage", {}) if audit_result else {}
         inspected = code_coverage.get("files_inspected")
-        code_scope = f'조사 파일 {inspected}개 · Python/JavaScript/TypeScript 정적 패턴만 지원' if inspected is not None else "아직 코드 조사 기록이 없습니다"
+        languages = ", ".join(code_coverage.get("languages", []))
+        code_scope = f'조사 파일 {inspected}개 · 지원 언어 {languages}' if inspected is not None else "아직 코드 조사 기록이 없습니다"
         if code_coverage.get("truncated"):
             code_scope += " · 파일 상한으로 조사 잘림"
         candidates = "".join(f'<tr><td>{esc(x.get("id"))}</td><td>{esc(x.get("kind"))}</td><td>{esc(x.get("path"))}:{esc(x.get("sink_line"))}</td><td>검토 후보</td></tr>' for x in hypotheses)
@@ -210,7 +211,7 @@ def lab(selected: str | None, report: dict | None, audits: list[dict], job: dict
             compare_note += " 참조 커밋은 처음 5개만 수집했습니다."
         details = f'''<section><div class="section-heading"><div><span class="eyebrow">SELECTED REPOSITORY</span><h2>{esc(selected)}</h2></div><span class="pill">마지막 수집 {esc(str(repo_data.get("last_sync") or "")[:16])} UTC</span></div><div class="metrics compact">{metric("고유 공지", count, "저장소 연관 공지")}{metric("변경 기록", len(changes), "표시 범위 최대 300건")}{metric("코드 가설", len(hypotheses), "미검증 후보")}</div><p class="coverage">수집 범위: {esc(coverage)}<br>경고: {esc(warnings)}</p></section>
 <section><div class="section-heading"><div><span class="eyebrow">ADVISORY TRACKING</span><h2>보안 공지 추적</h2></div><p>CWE는 공지 원문에 명시된 값만 표시</p></div>{table(["시각", "기록", "식별자", "CVE", "취약점 유형 (CWE)", "공지", "심각도"], rows) if rows else empty("이 저장소의 보안 공지 기록이 아직 없습니다.")}</section>
-<section><div class="section-heading"><div><span class="eyebrow">ZERO-DAY RESEARCH</span><h2>미공개 취약점 조사</h2></div><p>후보 ≠ 발견 확정</p></div><div class="notice subdued">소스 스캔은 검토 가설만 만듭니다. 제로데이 판정에는 영향 재현, 중복 공지 확인, 사람의 검토가 필요합니다.</div><p class="coverage">{esc(code_scope)}. C/C++ 등 미지원 언어의 후보 0건은 안전성의 증거가 아닙니다.</p>{table(["후보 ID", "분류", "코드 위치", "상태"], candidates) if candidates else empty("코드 가설이 없습니다. 조사 완료 여부와 스캔 범위를 확인하세요.")}</section>'''
+<section><div class="section-heading"><div><span class="eyebrow">ZERO-DAY RESEARCH</span><h2>미공개 취약점 조사</h2></div><p>후보 ≠ 발견 확정</p></div><div class="notice subdued">소스 스캔은 검토 가설만 만듭니다. 제로데이 판정에는 영향 재현, 중복 공지 확인, 사람의 검토가 필요합니다.</div><p class="coverage">{esc(code_scope)}. 미지원 언어·패턴의 후보 0건은 안전성의 증거가 아닙니다.</p>{table(["후보 ID", "분류", "코드 위치", "상태"], candidates) if candidates else empty("코드 가설이 없습니다. 조사 완료 여부와 스캔 범위를 확인하세요.")}</section>'''
         details += f'''<section><div class="section-heading"><div><span class="eyebrow">BEFORE / AFTER</span><h2>Fix 전후 비교</h2></div><p>버전과 공지 참조 커밋 기준</p></div><div class="notice subdued">{esc(compare_note)}</div><h3>영향 버전 → 패치 버전</h3>{table(["공지", "패키지", "영향 범위", "패치 버전"], versions) if versions else empty("공지에 연결된 패키지 버전 정보가 없습니다.")}<h3 class="subheading">참조 커밋의 변경 줄</h3>{diff_cards or empty("저장된 공지 참조 커밋 비교가 없습니다. 새로 수집한 공지에 수정 커밋 링크가 없다면 코드 전후를 자동 연결하지 않습니다.")}</section>'''
     elif selected:
         details = "<section>" + empty("아직 이 저장소의 수집 기록이 없습니다. 조사 상태를 확인하세요.") + "</section>"

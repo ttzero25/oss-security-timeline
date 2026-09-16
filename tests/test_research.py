@@ -10,6 +10,7 @@ from oss_timeline.research import DisclosureAgent, PocValidatorAgent, SourceScan
 
 
 FIXTURE = Path(__file__).parent / "fixtures" / "synthetic_app.py"
+NATIVE_FIXTURE = Path(__file__).parent / "fixtures" / "synthetic_native.c"
 
 
 class ResearchTests(unittest.TestCase):
@@ -24,9 +25,17 @@ class ResearchTests(unittest.TestCase):
 
     def test_source_scan_keeps_pattern_as_hypothesis(self):
         findings, coverage = SourceScanAgent().run(FIXTURE.parent, "fixture/synthetic", "a" * 40)
-        self.assertEqual(len(findings), 2)
-        self.assertTrue(all(x.kind == "command_injection" and x.status == "hypothesis" for x in findings))
+        python_findings = [x for x in findings if x.path.endswith("synthetic_app.py")]
+        self.assertEqual(len(python_findings), 2)
+        self.assertTrue(all(x.kind == "command_injection" and x.status == "hypothesis" for x in python_findings))
         self.assertTrue(coverage["files_inspected"] >= 1)
+
+    def test_source_scan_supports_conservative_c_patterns(self):
+        findings, coverage = SourceScanAgent().run(NATIVE_FIXTURE.parent, "fixture/native", "b" * 40)
+        native = [x for x in findings if x.path.endswith("synthetic_native.c")]
+        self.assertEqual({x.kind for x in native}, {"command_injection", "format_string"})
+        self.assertEqual(len(native), 2)
+        self.assertIn("c/c++", coverage["languages"])
 
     def test_poc_controls_and_disclosure_gate(self):
         with tempfile.TemporaryDirectory() as temp:

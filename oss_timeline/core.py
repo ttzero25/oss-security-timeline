@@ -235,17 +235,20 @@ class InventoryAgent:
 
 
 class ChangeAgent:
-    def __init__(self, client: HttpClient, max_pages: int):
-        self.client, self.max_pages = client, max_pages
+    def __init__(self, client: HttpClient, max_pages: int, since: str | None = None, prior_commit_complete: bool = True):
+        self.client, self.max_pages, self.since, self.prior_commit_complete = client, max_pages, since, prior_commit_complete
 
     def run(self, result: Collection) -> None:
         base = "/repos/" + result.repo
         for kind, endpoint in (("release", "/releases"), ("commit", "/commits")):
             try:
-                rows, truncated = self.client.pages(base + endpoint, max_pages=self.max_pages)
-                result.coverage[kind] = not truncated
+                params = {"since": self.since} if kind == "commit" and self.since else None
+                rows, truncated = self.client.pages(base + endpoint, params, max_pages=self.max_pages)
+                result.coverage[kind] = not truncated and (kind != "commit" or not self.since or self.prior_commit_complete)
                 if truncated:
                     result.warnings.append(f"{kind} 페이지 제한에 도달했습니다. 전수 수집이 아닙니다")
+                elif kind == "commit" and self.since and not self.prior_commit_complete:
+                    result.warnings.append("신규 커밋 구간은 수집했지만 이전 실행의 과거 커밋 누락은 남아 있습니다")
                 for row in rows:
                     if kind == "release":
                         stamp = row.get("published_at") or row.get("created_at")
@@ -475,6 +478,16 @@ class Store:
             for finding in result.findings:
                 self.db.execute("INSERT INTO findings(repo,id,at,title,url,reasons,paths,evidence,status) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(repo,id) DO UPDATE SET reasons=excluded.reasons,paths=excluded.paths,evidence=excluded.evidence", (result.repo, finding["id"], finding["at"], finding["title"], finding["url"], json.dumps(finding["reasons"]), json.dumps(finding.get("paths", [])), json.dumps(finding.get("evidence", [])), finding["status"]))
 
+    def sync_state(self, repo: str) -> tuple[str | None, bool]:
+        row = self.db.execute("SELECT last_sync,coverage FROM repositories WHERE name=?", (repo_name(repo),)).fetchone()
+        if not row:
+            return None, True
+        try:
+            coverage = json.loads(row["coverage"])
+        except (TypeError, ValueError):
+            coverage = {}
+        return row["last_sync"], bool(coverage.get("commit"))
+
     def report(self, repo: str | None = None, limit: int = 300) -> dict:
         repositories = [dict(x) for x in self.db.execute("SELECT * FROM repositories ORDER BY name") if repo is None or x["name"] == repo]
         if repo and not repositories:
@@ -505,9 +518,10 @@ class Store:
 
 def synchronize(client: HttpClient, store: Store, repo: str, max_pages: int = 100, max_manifests: int = 100) -> Collection:
     result = Collection(repo_name(repo))
+    since, prior_commit_complete = store.sync_state(result.repo)
     InventoryAgent(client, max_manifests).run(result)
     with ThreadPoolExecutor(max_workers=2) as pool:
-        change = pool.submit(ChangeAgent(client, max_pages).run, result)
+        change = pool.submit(ChangeAgent(client, max_pages, since, prior_commit_complete).run, result)
         advisory = pool.submit(AdvisoryAgent(client, max_pages).run, result)
         change.result()
         advisory.result()

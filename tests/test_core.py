@@ -45,6 +45,9 @@ class TimelineTests(unittest.TestCase):
 
     def test_orchestrator_collects_package_change_and_advisory(self):
         class FakeClient:
+            def __init__(self):
+                self.commit_params = []
+
             def github(self, path, params=None):
                 if path == "/repos/example/demo":
                     return {"full_name": "example/demo", "private": False, "default_branch": "main"}
@@ -61,6 +64,7 @@ class TimelineTests(unittest.TestCase):
                 if path.endswith("/releases"):
                     return [], False
                 if path.endswith("/commits"):
+                    self.commit_params.append(params)
                     return [{"sha": "abc", "commit": {"message": "security: validate user", "committer": {"date": "2025-01-01T00:00:00Z"}}, "html_url": "https://github.com/example/demo/commit/abc"}], False
                 if path.endswith("/security-advisories"):
                     return [], False
@@ -75,10 +79,14 @@ class TimelineTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temp:
             store = Store(Path(temp) / "db.sqlite3")
-            result = synchronize(FakeClient(), store, "https://github.com/example/demo")
+            client = FakeClient()
+            result = synchronize(client, store, "https://github.com/example/demo")
             self.assertEqual(len(result.packages), 1)
             self.assertEqual(len(result.findings), 1)
             self.assertEqual(store.report()["ranking"][0]["advisories"], 1)
+            synchronize(client, store, "https://github.com/example/demo")
+            self.assertIsNone(client.commit_params[0])
+            self.assertIn("since", client.commit_params[1])
             store.db.close()
 
     def test_store_deduplicates_and_preserves_first_seen(self):

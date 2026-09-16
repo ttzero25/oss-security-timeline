@@ -22,6 +22,14 @@ JS_SINKS = [
     ("command_injection", re.compile(r"\b(?:child_process\.)?exec(?:Sync)?\s*\(")),
     ("code_execution", re.compile(r"\beval\s*\(")),
 ]
+C_EXTENSIONS = {".c", ".h", ".cc", ".cpp", ".cxx", ".hpp"}
+C_RETURN_SOURCE = re.compile(r"\b(?:getenv|getopt|getopt_long)\s*\(|\bargv\s*\[")
+C_BUFFER_SOURCE = re.compile(r"\b(?:recv|recvfrom|read|fgets|gets|scanf|sscanf)\s*\(")
+C_SINKS = [
+    ("command_injection", re.compile(r"\b(?:system|popen|execl|execlp|execv|execvp)\s*\(([^;]*)")),
+    ("format_string", re.compile(r"\b(?:printf|syslog)\s*\(([^;]*)")),
+    ("unsafe_copy", re.compile(r"\b(?:strcpy|strcat|sprintf|vsprintf)\s*\(([^;]*)")),
+]
 
 
 @dataclass
@@ -150,6 +158,52 @@ def _javascript_hypotheses(filename: Path, root: Path, repo: str, commit: str) -
     return output
 
 
+def _c_source_variable(line: str) -> str | None:
+    assignment = re.search(r"\b([A-Za-z_]\w*)\s*=\s*[^;]*(?:getenv|getopt|getopt_long)\s*\(|\b([A-Za-z_]\w*)\s*=\s*argv\s*\[", line)
+    if assignment:
+        return assignment.group(1) or assignment.group(2)
+    call = re.search(r"\b(?:recv|recvfrom|read)\s*\(\s*[^,]+,\s*([A-Za-z_]\w*)", line)
+    if call:
+        return call.group(1)
+    call = re.search(r"\b(?:fgets|gets)\s*\(\s*([A-Za-z_]\w*)", line)
+    if call:
+        return call.group(1)
+    scan = re.search(r"\b(?:scanf|sscanf)\s*\([^;]*,\s*&?([A-Za-z_]\w*)\s*\)", line)
+    return scan.group(1) if scan else None
+
+
+def _c_hypotheses(filename: Path, root: Path, repo: str, commit: str) -> list[Hypothesis]:
+    try:
+        lines = filename.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError):
+        return []
+    path = filename.relative_to(root).as_posix()
+    recent: list[tuple[int, str, str]] = []
+    output = []
+    for number, line in enumerate(lines, 1):
+        source_variable = _c_source_variable(line)
+        if source_variable and (C_RETURN_SOURCE.search(line) or C_BUFFER_SOURCE.search(line)):
+            recent.append((number, line, source_variable))
+        recent = [item for item in recent if number - item[0] <= 60]
+        for kind, pattern in C_SINKS:
+            match = pattern.search(line)
+            if not match:
+                continue
+            arguments = match.group(1)
+            if kind == "format_string":
+                first = arguments.split(",", 1)[0].strip()
+                if first.startswith('"'):
+                    continue
+            source = next((item for item in reversed(recent) if re.search(r"\b" + re.escape(item[2]) + r"\b", arguments)), None)
+            if source:
+                between = "\n".join(lines[source[0] : number - 1])
+                length_guard = re.search(r"\bstrlen\s*\(\s*" + re.escape(source[2]) + r"\s*\)\s*(?:>=|>)\s*sizeof\s*\(", between)
+                if kind == "unsafe_copy" and length_guard and re.search(r"\b(?:return|goto)\b", between[length_guard.start() :]):
+                    continue
+                output.append(_hypothesis(repo, commit, kind, path, source[0], number, source[1], line, "c_scope_unknown"))
+    return output
+
+
 class SourceScanAgent:
     """Conservative entry-to-sink hypotheses, not vulnerability verdicts."""
     def run(self, root: Path, repo: str, commit: str, max_files: int = 20_000) -> tuple[list[Hypothesis], dict]:
@@ -165,7 +219,7 @@ class SourceScanAgent:
                     continue
             except OSError:
                 continue
-            if filename.suffix not in {".py", ".js", ".mjs", ".cjs", ".ts", ".mts", ".cts"}:
+            if filename.suffix not in {".py", ".js", ".mjs", ".cjs", ".ts", ".mts", ".cts", *C_EXTENSIONS}:
                 continue
             inspected += 1
             if inspected > max_files:
@@ -173,9 +227,11 @@ class SourceScanAgent:
                 break
             if filename.suffix == ".py":
                 output.extend(_python_hypotheses(filename, root, repo, commit))
+            elif filename.suffix in C_EXTENSIONS:
+                output.extend(_c_hypotheses(filename, root, repo, commit))
             else:
                 output.extend(_javascript_hypotheses(filename, root, repo, commit))
-        return sorted({x.id: x for x in output}.values(), key=lambda x: (x.path, x.sink_line)), {"files_inspected": min(inspected, max_files), "truncated": truncated, "languages": ["python", "javascript/typescript"]}
+        return sorted({x.id: x for x in output}.values(), key=lambda x: (x.path, x.sink_line)), {"files_inspected": min(inspected, max_files), "truncated": truncated, "languages": ["python", "javascript/typescript", "c/c++"]}
 
 
 def checkout(target: str, checkouts: Path) -> tuple[Path, str]:
