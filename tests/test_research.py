@@ -37,6 +37,26 @@ class ResearchTests(unittest.TestCase):
         self.assertEqual(len(native), 2)
         self.assertIn("c/c++", coverage["languages"])
 
+    def test_c_scan_models_fixed_buffer_write_bounds(self):
+        oversized, coverage = SourceScanAgent().run(Path("benchmarks/cases/c_oversized_read"), "fixture/c-read", "1" * 40)
+        bounded, _ = SourceScanAgent().run(Path("benchmarks/cases/c_bounded_read"), "fixture/c-bounded-read", "2" * 40)
+        copied, _ = SourceScanAgent().run(Path("benchmarks/cases/c_tainted_memcpy"), "fixture/c-copy", "3" * 40)
+        guarded, _ = SourceScanAgent().run(Path("benchmarks/cases/c_guarded_memcpy"), "fixture/c-guarded-copy", "4" * 40)
+        scanned, _ = SourceScanAgent().run(Path("benchmarks/cases/c_unbounded_scan"), "fixture/c-scan", "5" * 40)
+        width_limited, _ = SourceScanAgent().run(Path("benchmarks/cases/c_bounded_scan"), "fixture/c-bounded-scan", "6" * 40)
+        self.assertIn("buffer_overflow", {item.kind for item in oversized})
+        self.assertIn("buffer_overflow", {item.kind for item in copied})
+        self.assertIn("buffer_overflow", {item.kind for item in scanned})
+        self.assertEqual(bounded, [])
+        self.assertEqual(guarded, [])
+        self.assertEqual(width_limited, [])
+        self.assertEqual(coverage["c_memory_model"], "fixed_stack_buffers_and_bounded_writes")
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "scopes.c").write_text('''#include <stdio.h>\n#include <stdlib.h>\nvoid source(void) {\n    char *message = getenv("MESSAGE");\n}\nvoid fixed(void) {\n    char *message = "fixed";\n    printf(message);\n}\n''', encoding="utf-8")
+            cross_function, _ = SourceScanAgent().run(root, "fixture/c-scopes", "7" * 40)
+            self.assertEqual(cross_function, [])
+
     def test_python_scan_traces_one_same_module_helper_hop(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

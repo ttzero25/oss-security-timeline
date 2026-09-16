@@ -1375,6 +1375,97 @@ def _c_source_variable(line: str) -> str | None:
     return scan.group(1) if scan else None
 
 
+def _c_bounded_size(expression: str, destination: str, capacity: int) -> bool:
+    compact = re.sub(r"\s+", "", expression)
+    if compact in {f"sizeof({destination})", f"sizeof{destination}"}:
+        return True
+    return compact.isdigit() and int(compact) <= capacity
+
+
+def _c_length_guarded(lines: list[str], start: int, end: int, length: str, destination: str, capacity: int) -> bool:
+    if not re.fullmatch(r"[A-Za-z_]\w*", length.strip()):
+        return False
+    window = "\n".join(lines[start:end])
+    limit = rf"(?:sizeof\s*\(\s*{re.escape(destination)}\s*\)|{capacity})"
+    check = re.search(rf"\b{re.escape(length.strip())}\b\s*(?:>|>=)\s*{limit}", window)
+    return bool(check and re.search(r"\b(?:return|goto|break)\b", window[check.end():]))
+
+
+def _c_memory_hypotheses(lines: list[str], path: str, repo: str, commit: str) -> list[Hypothesis]:
+    output = []
+    recent: list[tuple[int, str, str]] = []
+    buffers: dict[str, tuple[int, int]] = {}
+    function = "c_scope_unknown"
+    function_start = 0
+    brace_depth = 0
+    signature = re.compile(r"^\s*(?!if\b|for\b|while\b|switch\b)(?:[A-Za-z_]\w*[\s*&]+)+([A-Za-z_]\w*)\s*\([^;]*\)\s*\{")
+    for number, line in enumerate(lines, 1):
+        match = signature.search(line)
+        if match:
+            function = match.group(1)
+            function_start = number - 1
+            recent = []
+            buffers = {}
+            brace_depth = 0
+        brace_depth += line.count("{") - line.count("}")
+        declaration = re.search(r"\b(?:char|unsigned\s+char|uint8_t)\s+([A-Za-z_]\w*)\s*\[\s*(\d+)\s*\]", line)
+        if declaration:
+            buffers[declaration.group(1)] = (int(declaration.group(2)), number)
+        source_variable = _c_source_variable(line)
+        if source_variable and (C_RETURN_SOURCE.search(line) or C_BUFFER_SOURCE.search(line)):
+            recent.append((number, line, source_variable))
+        recent = [item for item in recent if number - item[0] <= 80]
+
+        call = re.search(r"\b(memcpy|memmove|read|recv|recvfrom|fgets|gets|scanf)\s*\((.*)", line)
+        if call:
+            name, arguments = call.group(1), _go_arguments(call.group(2))
+            destination = ""
+            length = ""
+            if name in {"memcpy", "memmove", "read", "recv", "recvfrom"} and len(arguments) >= 3:
+                destination, length = arguments[0 if name in {"memcpy", "memmove"} else 1], arguments[2]
+            elif name == "fgets" and len(arguments) >= 2:
+                destination, length = arguments[0], arguments[1]
+            elif name == "gets" and arguments:
+                destination = arguments[0]
+            elif name == "scanf" and len(arguments) >= 2:
+                destination = arguments[1].lstrip("&").strip()
+                format_value = arguments[0].strip()
+                width = re.search(r"%(\d+)s", format_value)
+                if "%s" not in format_value and not width:
+                    destination = ""
+                elif width:
+                    length = width.group(1)
+            destination = destination.strip()
+            if destination in buffers:
+                capacity, declaration_line = buffers[destination]
+                source = next((item for item in reversed(recent) if item[2] in _go_refs(" ".join(arguments[1:]))), None)
+                unsafe = name == "gets"
+                if name == "scanf":
+                    unsafe = not length or int(length) >= capacity
+                elif name in {"read", "recv", "recvfrom", "fgets"}:
+                    compact = re.sub(r"\s+", "", length)
+                    unsafe = compact.isdigit() and int(compact) > capacity or compact.startswith(f"sizeof({destination})+")
+                    length_source = next((item for item in reversed(recent) if item[2] != destination and item[2] in _go_refs(length)), None)
+                    if not unsafe and length_source and not _c_length_guarded(lines, function_start, number - 1, length, destination, capacity):
+                        unsafe = True
+                elif name in {"memcpy", "memmove"}:
+                    tainted = source is not None
+                    unsafe = tainted and not _c_bounded_size(length, destination, capacity) and not _c_length_guarded(lines, max(function_start, (source or (declaration_line, "", ""))[0] - 1), number - 1, length, destination, capacity)
+                if unsafe:
+                    source_line, source_code = (source[0], source[1]) if source else (number, line)
+                    trace = [
+                        {"role": "source", "path": path, "line": source_line, "function": function, "code": source_code.strip()[:240]},
+                        {"role": "fixed_buffer", "path": path, "line": declaration_line, "function": function, "code": lines[declaration_line - 1].strip()[:240]},
+                        {"role": "write", "path": path, "line": number, "function": function, "code": line.strip()[:240]},
+                    ]
+                    output.append(_hypothesis(repo, commit, "buffer_overflow", path, source_line, number, source_code, line, function, entry_kind="modeled_external_input", trace=trace))
+        if function != "c_scope_unknown" and brace_depth <= 0:
+            function = "c_scope_unknown"
+            buffers = {}
+            recent = []
+    return output
+
+
 def _c_hypotheses(filename: Path, root: Path, repo: str, commit: str) -> list[Hypothesis]:
     try:
         lines = filename.read_text(encoding="utf-8").splitlines()
@@ -1383,7 +1474,16 @@ def _c_hypotheses(filename: Path, root: Path, repo: str, commit: str) -> list[Hy
     path = filename.relative_to(root).as_posix()
     recent: list[tuple[int, str, str]] = []
     output = []
+    function = "c_scope_unknown"
+    brace_depth = 0
+    signature = re.compile(r"^\s*(?!if\b|for\b|while\b|switch\b)(?:[A-Za-z_]\w*[\s*&]+)+([A-Za-z_]\w*)\s*\([^;]*\)\s*\{")
     for number, line in enumerate(lines, 1):
+        function_match = signature.search(line)
+        if function_match:
+            function = function_match.group(1)
+            recent = []
+            brace_depth = 0
+        brace_depth += line.count("{") - line.count("}")
         source_variable = _c_source_variable(line)
         if source_variable and (C_RETURN_SOURCE.search(line) or C_BUFFER_SOURCE.search(line)):
             recent.append((number, line, source_variable))
@@ -1403,7 +1503,11 @@ def _c_hypotheses(filename: Path, root: Path, repo: str, commit: str) -> list[Hy
                 length_guard = re.search(r"\bstrlen\s*\(\s*" + re.escape(source[2]) + r"\s*\)\s*(?:>=|>)\s*sizeof\s*\(", between)
                 if kind == "unsafe_copy" and length_guard and re.search(r"\b(?:return|goto)\b", between[length_guard.start() :]):
                     continue
-                output.append(_hypothesis(repo, commit, kind, path, source[0], number, source[1], line, "c_scope_unknown"))
+                output.append(_hypothesis(repo, commit, kind, path, source[0], number, source[1], line, function))
+        if function != "c_scope_unknown" and brace_depth <= 0:
+            function = "c_scope_unknown"
+            recent = []
+    output.extend(_c_memory_hypotheses(lines, path, repo, commit))
     return output
 
 
@@ -1457,12 +1561,12 @@ class SourceScanAgent:
         output.extend(_python_multihop_hypotheses(python_files[:multihop_limit], root, repo, commit))
         output.extend(_javascript_multihop_hypotheses(javascript_files[:javascript_limit], root, repo, commit))
         output.extend(_go_multihop_hypotheses(go_files[:go_limit], root, repo, commit))
-        return sorted({x.id: x for x in output}.values(), key=lambda x: (x.path, x.sink_line)), {"files_inspected": len(selected_files), "eligible_files": len(supported_files), "files_skipped_by_limit": len(supported_files) - len(selected_files), "truncated": truncated, "priority_files_requested": len(priority_paths), "priority_files_scanned": priority_scanned, "selection_strategy": "recent_changes_first_then_path", "languages": ["python", "javascript/typescript", "go", "c/c++", "github-actions"], "python_multihop_files": multihop_limit, "python_multihop_truncated": len(python_files) > multihop_limit, "javascript_multihop_files": javascript_limit, "javascript_multihop_truncated": len(javascript_files) > javascript_limit, "go_multihop_files": go_limit, "go_multihop_truncated": len(go_files) > go_limit, "go_symbol_resolution": "import_path_alias_and_conservative_shadowing"}
+        return sorted({x.id: x for x in output}.values(), key=lambda x: (x.path, x.sink_line)), {"files_inspected": len(selected_files), "eligible_files": len(supported_files), "files_skipped_by_limit": len(supported_files) - len(selected_files), "truncated": truncated, "priority_files_requested": len(priority_paths), "priority_files_scanned": priority_scanned, "selection_strategy": "recent_changes_first_then_path", "languages": ["python", "javascript/typescript", "go", "c/c++", "github-actions"], "python_multihop_files": multihop_limit, "python_multihop_truncated": len(python_files) > multihop_limit, "javascript_multihop_files": javascript_limit, "javascript_multihop_truncated": len(javascript_files) > javascript_limit, "go_multihop_files": go_limit, "go_multihop_truncated": len(go_files) > go_limit, "go_symbol_resolution": "import_path_alias_and_conservative_shadowing", "c_memory_model": "fixed_stack_buffers_and_bounded_writes"}
 
 
 class SemanticAnalysisAgent:
     """Prioritize hypotheses and allow automatic reproduction only for bounded safe templates."""
-    SCORES = {"command_injection": 90, "workflow_injection": 88, "authentication_bypass": 85, "code_execution": 85, "privilege_assignment": 84, "authorization_scope_candidate": 82, "template_injection": 80, "sql_injection": 75, "concurrency_race_candidate": 72, "unsafe_deserialization": 70, "toctou_candidate": 68, "path_traversal": 65, "possible_ssrf": 60, "format_string": 55, "unsafe_copy": 50}
+    SCORES = {"buffer_overflow": 92, "command_injection": 90, "workflow_injection": 88, "authentication_bypass": 85, "code_execution": 85, "privilege_assignment": 84, "authorization_scope_candidate": 82, "template_injection": 80, "sql_injection": 75, "concurrency_race_candidate": 72, "unsafe_deserialization": 70, "toctou_candidate": 68, "path_traversal": 65, "possible_ssrf": 60, "format_string": 55, "unsafe_copy": 50}
 
     def run(self, hypotheses: list[dict], profile: dict | None = None) -> list[dict]:
         changed = (profile or {}).get("recent_changes", {}).get("files", {})
@@ -1507,7 +1611,7 @@ class ReachabilityGateAgent:
 
 class EvidenceGateAgent:
     """Apply explicit evidence gates before a private draft can be generated."""
-    HIGH_IMPACT = {"command_injection", "workflow_injection", "authentication_bypass", "privilege_assignment", "authorization_scope_candidate", "concurrency_race_candidate", "code_execution", "template_injection", "sql_injection", "unsafe_deserialization", "unsafe_copy", "format_string"}
+    HIGH_IMPACT = {"buffer_overflow", "command_injection", "workflow_injection", "authentication_bypass", "privilege_assignment", "authorization_scope_candidate", "concurrency_race_candidate", "code_execution", "template_injection", "sql_injection", "unsafe_deserialization", "unsafe_copy", "format_string"}
 
     def run(self, audit_data: dict, finding: dict, reachability: dict, evidence: dict, duplicate_review: dict) -> dict:
         trace = finding.get("trace") or []
@@ -2161,8 +2265,9 @@ class DuplicateReviewAgent:
         "concurrency_race_candidate": {"race condition", "improper synchronization", "concurrent execution", "CWE-362"},
         "toctou_candidate": {"TOCTOU", "race condition", "CWE-367"},
         "workflow_injection": {"GitHub Actions", "workflow injection", "pull_request_target", "CWE-829"},
+        "buffer_overflow": {"stack buffer overflow", "out-of-bounds write", "memory corruption", "CWE-121"},
     }
-    CWE = {"command_injection": "CWE-78", "workflow_injection": "CWE-829", "authentication_bypass": "CWE-347", "privilege_assignment": "CWE-266", "authorization_scope_candidate": "CWE-639", "concurrency_race_candidate": "CWE-362", "toctou_candidate": "CWE-367", "code_execution": "CWE-94", "unsafe_deserialization": "CWE-502", "possible_ssrf": "CWE-918", "sql_injection": "CWE-89", "template_injection": "CWE-1336", "path_traversal": "CWE-22"}
+    CWE = {"buffer_overflow": "CWE-121", "command_injection": "CWE-78", "workflow_injection": "CWE-829", "authentication_bypass": "CWE-347", "privilege_assignment": "CWE-266", "authorization_scope_candidate": "CWE-639", "concurrency_race_candidate": "CWE-362", "toctou_candidate": "CWE-367", "code_execution": "CWE-94", "unsafe_deserialization": "CWE-502", "possible_ssrf": "CWE-918", "sql_injection": "CWE-89", "template_injection": "CWE-1336", "path_traversal": "CWE-22"}
 
     def run(self, audit_data: dict, finding: dict) -> dict:
         context = audit_data.get("public_context", {})
@@ -2211,8 +2316,8 @@ class DuplicateReviewAgent:
 
 
 def _automatic_claim(finding: dict, duplicate_review: dict, reachability: dict, evidence_gate: dict) -> dict:
-    cwe = {"command_injection": "CWE-78", "workflow_injection": "CWE-829", "authentication_bypass": "CWE-347", "privilege_assignment": "CWE-266", "authorization_scope_candidate": "CWE-639", "concurrency_race_candidate": "CWE-362", "toctou_candidate": "CWE-367", "code_execution": "CWE-94", "sql_injection": "CWE-89", "unsafe_deserialization": "CWE-502", "possible_ssrf": "CWE-918", "path_traversal": "CWE-22"}.get(finding["kind"], "CWE pending review")
-    label = {"command_injection": "Command injection", "workflow_injection": "Workflow trust-boundary injection", "authentication_bypass": "Authentication verification bypass", "privilege_assignment": "Untrusted privilege assignment", "authorization_scope_candidate": "Authorization scope bypass candidate", "concurrency_race_candidate": "Unsynchronized security-state race candidate", "toctou_candidate": "TOCTOU race candidate", "code_execution": "Code execution"}.get(finding["kind"], finding["kind"])
+    cwe = {"buffer_overflow": "CWE-121", "command_injection": "CWE-78", "workflow_injection": "CWE-829", "authentication_bypass": "CWE-347", "privilege_assignment": "CWE-266", "authorization_scope_candidate": "CWE-639", "concurrency_race_candidate": "CWE-362", "toctou_candidate": "CWE-367", "code_execution": "CWE-94", "sql_injection": "CWE-89", "unsafe_deserialization": "CWE-502", "possible_ssrf": "CWE-918", "path_traversal": "CWE-22"}.get(finding["kind"], "CWE pending review")
+    label = {"buffer_overflow": "Stack buffer overflow candidate", "command_injection": "Command injection", "workflow_injection": "Workflow trust-boundary injection", "authentication_bypass": "Authentication verification bypass", "privilege_assignment": "Untrusted privilege assignment", "authorization_scope_candidate": "Authorization scope bypass candidate", "concurrency_race_candidate": "Unsynchronized security-state race candidate", "toctou_candidate": "TOCTOU race candidate", "code_execution": "Code execution"}.get(finding["kind"], finding["kind"])
     claim = claim_template(finding)
     matches = ", ".join(item.get("id") or item.get("ghsa") or item.get("cve") or "unknown" for item in duplicate_review["matches"])
     duplicate_text = f"Potential matches require human comparison: {matches}" if matches else f'No keyword match among {duplicate_review["checked"]} collected advisories; broader manual search is still required.'
