@@ -14,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 import tomllib
+import warnings
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -55,6 +56,12 @@ FRAMEWORK_DEPENDENCIES = {
     "github.com/gin-gonic/gin": "Gin", "github.com/labstack/echo": "Echo",
     "github.com/gofiber/fiber": "Fiber", "actix-web": "Actix Web", "rocket": "Rocket",
 }
+
+
+def _python_parse(text: str) -> ast.AST:
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", SyntaxWarning)
+        return ast.parse(text)
 
 
 def _dependency_records(filename: str, text: str, path: str) -> list[dict]:
@@ -338,7 +345,7 @@ class RepositoryProfilerAgent:
 def _python_hypotheses(filename: Path, root: Path, repo: str, commit: str) -> list[Hypothesis]:
     try:
         text = filename.read_text(encoding="utf-8")
-        tree = ast.parse(text)
+        tree = _python_parse(text)
     except (OSError, UnicodeError, SyntaxError):
         return []
     lines = text.splitlines()
@@ -395,7 +402,7 @@ def _python_interprocedural_hypotheses(filename: Path, root: Path, repo: str, co
     """Trace modeled external input through one same-module helper call."""
     try:
         text = filename.read_text(encoding="utf-8")
-        tree = ast.parse(text)
+        tree = _python_parse(text)
     except (OSError, UnicodeError, SyntaxError):
         return []
     lines = text.splitlines()
@@ -476,7 +483,7 @@ def _python_multihop_hypotheses(files: list[Path], root: Path, repo: str, commit
     for filename in files:
         try:
             text = filename.read_text(encoding="utf-8")
-            tree = ast.parse(text)
+            tree = _python_parse(text)
             relative = filename.relative_to(root)
         except (OSError, UnicodeError, SyntaxError, ValueError):
             continue
@@ -1395,7 +1402,7 @@ if (result !== undefined) console.log(Buffer.isBuffer(result) ? result.toString(
             manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
             return manifest_path
         try:
-            syntax = ast.parse(source_file.read_text(encoding="utf-8"))
+            syntax = _python_parse(source_file.read_text(encoding="utf-8"))
         except (OSError, UnicodeError, SyntaxError) as exc:
             raise ValueError("PoC 대상 Python 파일을 다시 분석할 수 없습니다") from exc
         top_level = [node for node in syntax.body if isinstance(node, ast.FunctionDef) and node.name == finding["function"]]

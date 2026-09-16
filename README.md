@@ -63,6 +63,12 @@ Python 3.11 이상이 필요합니다. 기본 CLI와 웹 화면에는 추가 Pyt
    python3 -m oss_timeline benchmark
    ```
 
+6. 공개 사례의 불변 커밋을 전체 체크아웃하여 발췌문 밖의 실제 저장소에서도 같은 취약/수정 차이가 유지되는지 측정합니다. 대상 코드는 빌드하거나 실행하지 않으며 결과는 `data/benchmarks/upstream-latest.json`에 저장됩니다.
+
+   ```sh
+   python3 -m oss_timeline benchmark-upstream --max-files 20000
+   ```
+
 웹은 한 번에 한 저장소를 조사하며 API 페이지와 매니페스트를 각각 최대 100개, 공지 참조 커밋은 최대 5개까지 읽습니다. 두 번째 수집부터는 마지막 관측 시각 이후 커밋만 요청해 API 사용량을 줄이되, 첫 수집에서 잘린 과거 이력은 완료로 오인하지 않고 경고를 유지합니다. 조사 완료 뒤 실험실의 수집 범위와 경고를 확인하세요. CWE와 참조 커밋 비교는 새 수집부터 채워지므로 기존 저장소는 다시 수집해야 합니다. 더 세밀한 범위 설정과 정기 관측에는 CLI의 `sync`·`watch`를 사용합니다. 문제가 생기면 [troubleshooting](troubleshooting/README.md)을 먼저 확인하세요.
 
 ## 코드 조사와 제보 흐름

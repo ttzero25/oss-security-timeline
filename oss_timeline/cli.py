@@ -7,7 +7,7 @@ import sys
 import time
 from pathlib import Path
 
-from .benchmark import benchmark_passes, run_benchmark
+from .benchmark import benchmark_passes, run_benchmark, run_upstream_benchmark
 from .core import ApiError, HttpClient, Store, repo_name, synchronize
 from .research import DisclosureAgent, PocValidatorAgent, ResearchOrchestrator, audit, checkout, mark_submission_status, prepare_poc, submission_status
 
@@ -71,6 +71,11 @@ def main(argv: list[str] | None = None) -> int:
     benchmark.add_argument("--output", type=Path, default=Path("data/benchmarks/latest.json"))
     benchmark.add_argument("--min-recall", type=float, default=0.0)
     benchmark.add_argument("--max-false-positive-cases", type=int, default=1_000_000)
+    upstream_benchmark = commands.add_parser("benchmark-upstream", help="고정 커밋의 전체 원본 저장소로 정적 탐지 평가")
+    upstream_benchmark.add_argument("--corpus", type=Path, default=Path("benchmarks/corpus.json"))
+    upstream_benchmark.add_argument("--output", type=Path, default=Path("data/benchmarks/upstream-latest.json"))
+    upstream_benchmark.add_argument("--max-files", type=int, default=20_000)
+    upstream_benchmark.add_argument("--min-pair-pass-rate", type=float, default=0.0)
     research = commands.add_parser("audit", help="체크아웃의 코드 경로에서 보안 가설 찾기")
     research.add_argument("target", help="공개 GitHub URL 또는 로컬 체크아웃 경로")
     research.add_argument("--repo", help="로컬 경로의 owner/repo")
@@ -122,6 +127,16 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps({"output": str(args.output), "scope": result["scope"], "metrics": result["metrics"]}, ensure_ascii=False))
             return 0 if benchmark_passes(result, args.min_recall, args.max_false_positive_cases) else 2
         except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError) as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+    if args.command == "benchmark-upstream":
+        if args.max_files < 1 or not 0 <= args.min_pair_pass_rate <= 1:
+            parser.error("전체 저장소 벤치마크 기준값이 올바르지 않습니다")
+        try:
+            result = run_upstream_benchmark(args.corpus, args.output, args.max_files)
+            print(json.dumps({"output": str(args.output), "scope": result["scope"], "metrics": result["metrics"]}, ensure_ascii=False))
+            return 0 if (result["metrics"]["pair_pass_rate"] or 0) >= args.min_pair_pass_rate else 2
+        except (OSError, ValueError, RuntimeError, KeyError, TypeError, json.JSONDecodeError) as exc:
             print(str(exc), file=sys.stderr)
             return 1
     if args.command in {"audit", "research-run", "poc-init", "poc-verify", "disclosure", "report-status", "report-mark"}:

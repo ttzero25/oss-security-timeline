@@ -5,7 +5,7 @@ import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
 
-from oss_timeline.benchmark import benchmark_passes, run_benchmark
+from oss_timeline.benchmark import benchmark_passes, run_benchmark, run_upstream_benchmark
 from oss_timeline.cli import main
 
 
@@ -68,6 +68,33 @@ class BenchmarkTests(unittest.TestCase):
             manifest.write_text(json.dumps({"schema_version": 1, "cases": [{"id": "only-fixed", "path": "case", "origin": "historical", "pair_id": "CVE-2099-1", "expectation": "clean", "expected_kinds": [], "provenance": provenance}]}), encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "정확히 하나씩"):
                 run_benchmark(manifest)
+
+    def test_upstream_benchmark_scans_full_checkout_but_scores_source_paths(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            vulnerable = root / "vulnerable"
+            fixed = root / "fixed"
+            vulnerable.mkdir()
+            fixed.mkdir()
+            unsafe = 'import subprocess\ndef run(request):\n    value = request.args["value"]\n    return subprocess.run(value, shell=True)\n'
+            safe = 'import subprocess\ndef run(request):\n    value = request.args["value"]\n    return subprocess.run(["printf", "%s", value])\n'
+            (vulnerable / "app.py").write_text(unsafe, encoding="utf-8")
+            (fixed / "app.py").write_text(safe, encoding="utf-8")
+            (fixed / "unrelated.py").write_text(unsafe, encoding="utf-8")
+            vuln_sha, fixed_sha = "a" * 40, "b" * 40
+            common = {"advisory": "GHSA-5w57-2ccq-8w95", "repository": "owner/repo", "source_path": "app.py", "snapshot_type": "focused_excerpt"}
+            cases = [
+                {"id": "real-vulnerable", "path": "vulnerable", "origin": "historical", "pair_id": "CVE-2099-1", "expectation": "vulnerable", "expected_kinds": ["command_injection"], "provenance": {**common, "ref": vuln_sha, "url": f"https://github.com/owner/repo/blob/{vuln_sha}/app.py"}},
+                {"id": "real-fixed", "path": "fixed", "origin": "historical", "pair_id": "CVE-2099-1", "expectation": "clean", "expected_kinds": [], "provenance": {**common, "ref": fixed_sha, "url": f"https://github.com/owner/repo/blob/{fixed_sha}/app.py"}},
+            ]
+            manifest = root / "corpus.json"
+            manifest.write_text(json.dumps({"schema_version": 1, "version": "fixture", "cases": cases}), encoding="utf-8")
+            output = root / "upstream.json"
+            result = run_upstream_benchmark(manifest, output, checkout_roots={("owner/repo", vuln_sha): vulnerable, ("owner/repo", fixed_sha): fixed})
+            self.assertEqual(result["metrics"]["pairs_passed"], 1)
+            self.assertEqual(result["metrics"]["pair_pass_rate"], 1.0)
+            self.assertEqual(result["cases"][1]["found_kinds"], [])
+            self.assertTrue(output.is_file())
 
 
 if __name__ == "__main__":

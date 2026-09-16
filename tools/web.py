@@ -495,7 +495,7 @@ def lab(selected: str | None, report: dict | None, audits: list[dict], job: dict
     return page("실험실", "lab", body, running)
 
 
-def summary(report: dict, audits: list[dict], benchmark: dict | None = None) -> str:
+def summary(report: dict, audits: list[dict], benchmark: dict | None = None, upstream_benchmark: dict | None = None) -> str:
     by_repo = {}
     for audit in audits:
         by_repo.setdefault(audit["repo"], audit)
@@ -512,7 +512,13 @@ def summary(report: dict, audits: list[dict], benchmark: dict | None = None) -> 
         percent = lambda value: f"{float(value) * 100:.1f}%" if value is not None else "미산출"
         historical = metrics.get("by_origin", {}).get("historical", {})
         historical_card = metric("공개 취약/수정 쌍", f'{metrics.get("historical_pairs_passed", 0)}/{metrics.get("historical_pairs_total", 0)}', f'출처 고정 사례 {historical.get("cases", 0)}개') if historical else ""
-        benchmark_section = f'''<section><div class="section-heading"><div><span class="eyebrow">SCANNER BENCHMARK</span><h2>정적 탐지 기준선</h2></div><p>{esc(benchmark.get("corpus_version", ""))} · {esc(str(benchmark.get("generated_at") or "")[:19])} UTC</p></div><div class="metrics compact">{metric("취약 사례 재현율", percent(metrics.get("recall_at_case_limit")), f'{metrics.get("true_positive_cases", 0)}/{metrics.get("vulnerable_cases", 0)} 사례')}{metric("사례 정밀도", percent(metrics.get("case_precision")), f'오탐 사례 {metrics.get("false_positive_cases", 0)}건')}{metric("정상 사례 특이도", percent(metrics.get("clean_specificity")), f'{metrics.get("true_negative_cases", 0)}/{metrics.get("clean_cases", 0)} 사례')}{metric("전체 통과율", percent(metrics.get("pass_rate")), f'총 {metrics.get("total_cases", 0)} 사례')}{historical_card}</div><p class="coverage">{esc(benchmark.get("scope"))}. 합성 사례와 최소 공개 취약/수정 발췌문 기준이며 실제 저장소 성능을 대신하지 않습니다.</p></section>'''
+        upstream_card = ""
+        upstream_note = "전체 원본 저장소 평가는 아직 실행되지 않았습니다."
+        if upstream_benchmark:
+            upstream_metrics = upstream_benchmark.get("metrics", {})
+            upstream_card = metric("전체 저장소 쌍", f'{upstream_metrics.get("pairs_passed", 0)}/{upstream_metrics.get("pairs_total", 0)}', f'고정 커밋 사례 {upstream_metrics.get("cases", 0)}개')
+            upstream_note = f'{upstream_benchmark.get("scope", "")} · 파일 상한 {upstream_benchmark.get("max_files_per_checkout", 0)}개/체크아웃'
+        benchmark_section = f'''<section><div class="section-heading"><div><span class="eyebrow">SCANNER BENCHMARK</span><h2>정적 탐지 기준선</h2></div><p>{esc(benchmark.get("corpus_version", ""))} · {esc(str(benchmark.get("generated_at") or "")[:19])} UTC</p></div><div class="metrics compact">{metric("취약 사례 재현율", percent(metrics.get("recall_at_case_limit")), f'{metrics.get("true_positive_cases", 0)}/{metrics.get("vulnerable_cases", 0)} 사례')}{metric("사례 정밀도", percent(metrics.get("case_precision")), f'오탐 사례 {metrics.get("false_positive_cases", 0)}건')}{metric("정상 사례 특이도", percent(metrics.get("clean_specificity")), f'{metrics.get("true_negative_cases", 0)}/{metrics.get("clean_cases", 0)} 사례')}{metric("전체 통과율", percent(metrics.get("pass_rate")), f'총 {metrics.get("total_cases", 0)} 사례')}{historical_card}{upstream_card}</div><p class="coverage">{esc(benchmark.get("scope"))}. 발췌문 기준 수치는 실제 저장소 성능을 대신하지 않습니다.<br>{esc(upstream_note)}</p></section>'''
     forecast = report.get("forecast", {})
     if forecast.get("status") == "estimated":
         interval = forecast.get("interval_90", ["?", "?"])
@@ -631,7 +637,7 @@ def serve(port: int, db_path: Path, research_root: Path, registry_path: Path) ->
                 elif path == "/":
                     self.respond(home(report, stats, audits, agent_registry(registry_path)))
                 elif path == "/summary":
-                    self.respond(summary(report, audits, benchmark_snapshot(db_path.parent / "benchmarks" / "latest.json")))
+                    self.respond(summary(report, audits, benchmark_snapshot(db_path.parent / "benchmarks" / "latest.json"), benchmark_snapshot(db_path.parent / "benchmarks" / "upstream-latest.json")))
                 elif path == "/graph":
                     all_report, _ = snapshot(db_path)
                     self.respond(graph_page([x["name"] for x in all_report["repositories"]], selected))

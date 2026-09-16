@@ -1,8 +1,10 @@
 # Tools
 
-The main command line is `python3 -m oss_timeline`. It provides `sync`, `watch`, `report`, `benchmark`, `audit`, `research-run`, `poc-init`, `poc-verify` and `disclosure`.
+The main command line is `python3 -m oss_timeline`. It provides `sync`, `watch`, `report`, `benchmark`, `benchmark-upstream`, `audit`, `research-run`, `poc-init`, `poc-verify` and `disclosure`.
 
 `python3 -m oss_timeline benchmark` runs the versioned local static-analysis corpus without executing target code. It writes case-level recall, precision, clean specificity, rank and coverage to `data/benchmarks/latest.json`; optional threshold flags return exit code 2 when the scanner regresses.
+
+`python3 -m oss_timeline benchmark-upstream` fetches each historical case's immutable commit into a temporary checkout and statically scans the full repository with the cited source paths prioritized. It never builds or executes target code. Vulnerable and fixed refs are scored only for the expected kind on those cited paths, while unrelated findings remain outside the pair verdict. Results are written to `data/benchmarks/upstream-latest.json` and shown separately in the web summary.
 
 `python3 tools/web.py --port 8765` starts the loopback-only dashboard. Home shows cumulative counts and agent roles; the lab accepts a public GitHub repository URL and runs advisory collection, repository profiling, static code research, and supported bounded PoC contrasts; summary compares results by repository and package; the relationship graph connects repositories, packages, advisories, CVEs, CWEs, referenced fix commits and code hypotheses; reports reads generated evidence and private drafts. It writes local `data/timeline.sqlite3` and `data/research/`. The web may run only allowlisted local PoC contrasts; it never modifies a completed draft or submits a disclosure. Only one web research job runs at a time. Its results are bounded by 100 API pages and 100 manifests, so review coverage warnings before treating them as complete.
 

@@ -110,6 +110,17 @@ class DashboardTests(unittest.TestCase):
             self.assertIn("출처 고정 사례 2개", rendered)
             self.assertIn("실제 저장소 성능을 대신하지 않습니다", rendered)
 
+    def test_summary_shows_full_upstream_benchmark_separately(self):
+        with tempfile.TemporaryDirectory() as temp:
+            store = Store(Path(temp) / "db.sqlite3")
+            local = {"corpus_version": "fixture", "generated_at": "2026-09-16T00:00:00Z", "scope": "focused", "metrics": {"total_cases": 2, "vulnerable_cases": 1, "clean_cases": 1, "true_positive_cases": 1, "false_positive_cases": 0, "true_negative_cases": 1, "recall_at_case_limit": 1.0, "case_precision": 1.0, "clean_specificity": 1.0, "pass_rate": 1.0, "by_origin": {"historical": {"cases": 2}}, "historical_pairs_total": 1, "historical_pairs_passed": 1}}
+            upstream = {"scope": "immutable full upstream checkout", "max_files_per_checkout": 20000, "metrics": {"cases": 2, "pairs_total": 1, "pairs_passed": 1}}
+            rendered = summary(store.report(), [], local, upstream)
+            store.db.close()
+            self.assertIn("전체 저장소 쌍", rendered)
+            self.assertIn("고정 커밋 사례 2개", rendered)
+            self.assertIn("immutable full upstream checkout", rendered)
+
     def test_summary_shows_forecast_interval_confidence_and_context(self):
         with tempfile.TemporaryDirectory() as temp:
             store = Store(Path(temp) / "db.sqlite3")
