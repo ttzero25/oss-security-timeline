@@ -28,6 +28,7 @@ AGENT_DESCRIPTIONS = {
     "AdvisoryAgent": "GitHub·OSV 공개 보안 공지 수집",
     "CandidateAgent": "보안 관련 공개 변경의 검토 후보 선별",
     "SourceScanAgent": "코드의 입력 경로와 위험 동작 연결 가설 탐색",
+    "ResearchOrchestrator": "후보 우선순위화와 제한된 격리 재현 단계 조율",
     "PocValidatorAgent": "정상·공격 입력의 격리 PoC 결과 대조",
     "DisclosureAgent": "검증 근거에 기반한 비공개 제보 초안 생성",
 }
@@ -64,6 +65,47 @@ def research_index(root: Path) -> list[dict]:
         except (OSError, ValueError, KeyError, TypeError):
             continue
     return sorted(items, key=lambda x: x.get("generated_at") or "", reverse=True)
+
+
+def disclosure_index(root: Path) -> list[dict]:
+    """Read CLI evidence and report drafts without executing any artifact."""
+    items = []
+    if not root.is_dir():
+        return items
+    for audit_path in root.rglob("audit.json"):
+        try:
+            audit_data = json.loads(audit_path.read_text(encoding="utf-8"))
+            repo = repo_name(audit_data["repo"])
+            commit = str(audit_data["commit"])
+            hypotheses = {item["id"]: item for item in audit_data.get("hypotheses", [])}
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+        for finding_id, finding in hypotheses.items():
+            folder = audit_path.parent / finding_id
+            evidence_path = folder / "evidence.json"
+            ghsa_path = folder / "GHSA_CANDIDATE.md"
+            cve_path = folder / "CVE_REQUEST_BRIEF.md"
+            if not any(path.is_file() for path in (evidence_path, ghsa_path, cve_path)):
+                continue
+            evidence = {}
+            if evidence_path.is_file():
+                try:
+                    evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+                except (OSError, ValueError, TypeError):
+                    evidence = {"mechanical_result": "invalid_evidence"}
+            evidence_matches = evidence.get("finding_id") == finding_id and evidence.get("commit") == commit
+            verified = evidence_matches and evidence.get("mechanical_result") == "contrast_matched"
+            try:
+                ghsa_text = ghsa_path.read_text(encoding="utf-8") if ghsa_path.is_file() else ""
+                cve_text = cve_path.read_text(encoding="utf-8") if cve_path.is_file() else ""
+            except (OSError, UnicodeError):
+                ghsa_text = cve_text = ""
+            drafts_ready = verified and bool(ghsa_text and cve_text)
+            title = finding_id
+            if ghsa_text.startswith("# "):
+                title = ghsa_text.splitlines()[0][2:].strip() or finding_id
+            items.append({"key": f"{repo}|{commit}|{finding_id}", "repo": repo, "commit": commit, "finding_id": finding_id, "kind": finding.get("kind", ""), "path": finding.get("path", ""), "sink_line": finding.get("sink_line", ""), "title": title, "mechanical_result": evidence.get("mechanical_result", "not_run"), "validated_at": evidence.get("validated_at"), "verification_mode": evidence.get("mode"), "verified": verified, "drafts_ready": drafts_ready, "ghsa_text": ghsa_text, "cve_text": cve_text})
+    return sorted(items, key=lambda item: (item.get("validated_at") or "", item["repo"], item["finding_id"]), reverse=True)
 
 
 def agent_registry(path: Path) -> list[dict]:
@@ -239,8 +281,35 @@ def graph_page(repositories: list[str], selected: str | None = None) -> str:
     return page("관계망", "graph", body)
 
 
+def reports_page(reports: list[dict], selected_key: str | None = None, document: str = "ghsa") -> str:
+    ready = sum(item["drafts_ready"] for item in reports)
+    verified = sum(item["verified"] for item in reports)
+    selected = next((item for item in reports if item["key"] == selected_key), None)
+    cards = ""
+    for item in reports:
+        if item["drafts_ready"]:
+            state, state_class = "제보 초안 준비", "ready"
+        elif item["verified"]:
+            state, state_class = "PoC 대조 성공", "verified"
+        else:
+            state, state_class = "미확인", "pending"
+        links = ""
+        if item["drafts_ready"]:
+            key = quote(item["key"], safe="")
+            links = f'<div class="report-links"><a href="/reports?report={key}&amp;doc=ghsa">GHSA 초안 보기</a><a href="/reports?report={key}&amp;doc=cve">CVE 브리프 보기</a></div>'
+        cards += f'''<article class="report-card"><div class="report-card-head"><span class="report-state {state_class}">{state}</span><small>{esc(str(item.get("validated_at") or "검증 기록 없음")[:19])}</small></div><h2>{esc(item["title"])}</h2><p>{esc(item["repo"])} · <code>{esc(item["commit"][:12])}</code></p><dl><div><dt>후보 ID</dt><dd>{esc(item["finding_id"])}</dd></div><div><dt>유형</dt><dd>{esc(item["kind"] or "미기재")}</dd></div><div><dt>위치</dt><dd>{esc(item["path"])}:{esc(item["sink_line"])}</dd></div><div><dt>검증 방식</dt><dd>{esc(item.get("verification_mode") or "미실행")}</dd></div></dl>{links}</article>'''
+    viewer = ""
+    if selected:
+        label = "GHSA 비공개 제보 초안" if document == "ghsa" else "CVE 요청 브리프"
+        content = selected["ghsa_text"] if document == "ghsa" else selected["cve_text"]
+        if selected["drafts_ready"] and content:
+            viewer = f'''<section class="report-viewer"><div class="section-heading"><div><span class="eyebrow">PRIVATE DRAFT</span><h2>{label}</h2></div><a href="/reports">닫기</a></div><div class="notice subdued">로컬 CLI가 생성한 비공개 초안입니다. 자동 제출되지 않았으며 공개 전 사람의 검토가 필요합니다.</div><pre>{esc(content)}</pre></section>'''
+    body = f'''<section class="page-head"><span class="eyebrow">CLI ARTIFACTS</span><h1>검증 리포트</h1><p>격리된 CLI 검증 결과와 비공개 GHSA/CVE 제보 초안을 읽기 전용으로 확인합니다.</p></section><section><div class="metrics compact">{metric("CLI 산출물", len(reports), "PoC 실행 기록 포함")}{metric("PoC 대조 성공", verified, "동일 커밋·후보 근거")}{metric("제보 초안", ready, "GHSA와 CVE 문서 쌍")}</div></section>{viewer}<section><div class="section-heading"><div><span class="eyebrow">LOCAL ONLY</span><h2>리포트 목록</h2></div><p>새로고침할 때 data/research를 다시 읽음</p></div><div class="notice subdued">웹은 이 산출물을 실행하거나 수정하거나 외부로 제출하지 않습니다. ‘미확인’ 항목은 제로데이 발견으로 간주할 수 없습니다.</div><div class="report-grid">{cards}</div>{empty("아직 CLI PoC 검증 또는 제보 초안 산출물이 없습니다.") if not reports else ""}</section>'''
+    return page("검증 리포트", "reports", body)
+
+
 def page(title: str, active: str, content: str, refresh: bool = False) -> str:
-    nav = "".join(f'<a class="{"active" if active == key else ""}" href="{url}">{label}</a>' for key, url, label in [("home", "/", "Home"), ("lab", "/lab", "실험실"), ("summary", "/summary", "정리"), ("graph", "/graph", "관계망")])
+    nav = "".join(f'<a class="{"active" if active == key else ""}" href="{url}">{label}</a>' for key, url, label in [("home", "/", "Home"), ("lab", "/lab", "실험실"), ("summary", "/summary", "정리"), ("graph", "/graph", "관계망"), ("reports", "/reports", "리포트")])
     meta = '<meta http-equiv="refresh" content="5">' if refresh else ""
     return f'''<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">{meta}<title>{esc(title)} · OSS Security Timeline</title><style>{CSS}</style></head>
 <body><div class="shell"><header class="topbar"><a class="brand" href="/"><span class="brand-mark">◈</span> OSS Security Timeline</a><nav aria-label="주요 메뉴">{nav}</nav><span class="local-badge">LOCAL ONLY</span></header><main>{content}</main><footer>공개 정보와 로컬 조사 기록을 보여줍니다. 코드 후보는 검증된 취약점이 아닙니다.</footer></div></body></html>'''
@@ -404,7 +473,7 @@ def serve(port: int, db_path: Path, research_root: Path, registry_path: Path) ->
             if path == "/graph.js":
                 self.respond(GRAPH_JS, content_type="text/javascript; charset=utf-8")
                 return
-            if path in {"/", "/lab", "/summary", "/graph", "/api/report", "/api/research", "/api/graph"}:
+            if path in {"/", "/lab", "/summary", "/graph", "/reports", "/api/report", "/api/research", "/api/graph"}:
                 audits = research_index(research_root)
                 if path == "/api/research":
                     self.respond(json.dumps(audits, ensure_ascii=False), content_type="application/json; charset=utf-8")
@@ -437,6 +506,12 @@ def serve(port: int, db_path: Path, research_root: Path, registry_path: Path) ->
                 elif path == "/graph":
                     all_report, _ = snapshot(db_path)
                     self.respond(graph_page([x["name"] for x in all_report["repositories"]], selected))
+                elif path == "/reports":
+                    query = parse_qs(parsed.query)
+                    document = query.get("doc", ["ghsa"])[0]
+                    if document not in {"ghsa", "cve"}:
+                        document = "ghsa"
+                    self.respond(reports_page(disclosure_index(research_root), query.get("report", [None])[0], document))
                 else:
                     with lock:
                         job = jobs.get(selected, {}).copy() if selected else None

@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 
 from oss_timeline.core import Collection, Store
-from tools.web import fix_index, graph_page, graph_snapshot, home, lab, load_jobs, snapshot, summary
+from tools.web import disclosure_index, fix_index, graph_page, graph_snapshot, home, lab, load_jobs, reports_page, snapshot, summary
 
 
 class DashboardTests(unittest.TestCase):
@@ -66,6 +66,28 @@ class DashboardTests(unittest.TestCase):
             rendered = graph_page(["example/demo"], "example/demo")
             self.assertIn('href="/graph"', rendered)
             self.assertIn('src="/graph.js"', rendered)
+
+    def test_cli_disclosure_artifacts_are_read_only_web_reports(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            audit_folder = root / "example_demo" / ("a" * 40)
+            finding_id = "FIND-123456789ABC"
+            report_folder = audit_folder / finding_id
+            report_folder.mkdir(parents=True)
+            audit = {"repo": "example/demo", "commit": "a" * 40, "hypotheses": [{"id": finding_id, "kind": "command_injection", "path": "app.py", "sink_line": 9}]}
+            (audit_folder / "audit.json").write_text(json.dumps(audit), encoding="utf-8")
+            evidence = {"finding_id": finding_id, "commit": "a" * 40, "mechanical_result": "contrast_matched", "mode": "offline_container", "validated_at": "2026-09-16T00:00:00Z"}
+            (report_folder / "evidence.json").write_text(json.dumps(evidence), encoding="utf-8")
+            (report_folder / "GHSA_CANDIDATE.md").write_text("# Private <candidate>\n\nDo not submit automatically.", encoding="utf-8")
+            (report_folder / "CVE_REQUEST_BRIEF.md").write_text("# CVE request brief\n", encoding="utf-8")
+            reports = disclosure_index(root)
+            self.assertEqual(len(reports), 1)
+            self.assertTrue(reports[0]["drafts_ready"])
+            rendered = reports_page(reports, reports[0]["key"], "ghsa")
+            self.assertIn("제보 초안 준비", rendered)
+            self.assertIn("Private &lt;candidate&gt;", rendered)
+            self.assertNotIn("Private <candidate>", rendered)
+            self.assertIn('href="/reports"', rendered)
 
 
 if __name__ == "__main__":

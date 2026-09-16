@@ -234,6 +234,109 @@ class SourceScanAgent:
         return sorted({x.id: x for x in output}.values(), key=lambda x: (x.path, x.sink_line)), {"files_inspected": min(inspected, max_files), "truncated": truncated, "languages": ["python", "javascript/typescript", "c/c++"]}
 
 
+class SemanticAnalysisAgent:
+    """Prioritize hypotheses and allow automatic reproduction only for bounded safe templates."""
+    SCORES = {"command_injection": 90, "code_execution": 85, "unsafe_deserialization": 70, "possible_ssrf": 60, "format_string": 55, "unsafe_copy": 50}
+
+    def run(self, hypotheses: list[dict]) -> list[dict]:
+        output = []
+        for finding in hypotheses:
+            suffix = Path(finding.get("path", "")).suffix
+            supported = suffix == ".py" and finding.get("kind") in {"command_injection", "code_execution"}
+            score = self.SCORES.get(finding.get("kind"), 40)
+            if finding.get("function") and finding["function"] != "javascript_scope_unknown":
+                score += 5
+            output.append({**finding, "priority": min(score, 100), "auto_reproduction_supported": supported, "automation_reason": "제한된 Python 실제 함수 호출 템플릿 지원" if supported else "이 언어·취약점 유형의 안전한 자동 PoC 템플릿이 없음"})
+        return sorted(output, key=lambda item: (-item["priority"], item.get("path", ""), item.get("sink_line", 0)))
+
+
+class BuildEnvironmentAgent:
+    """Resolve a pinned, network-disabled runtime without installing target dependencies."""
+    def run(self, checkout_root: Path, finding: dict) -> dict:
+        if Path(finding["path"]).suffix != ".py":
+            return {"status": "unsupported", "reason": "현재 자동 빌드 환경은 Python 후보만 지원합니다"}
+        manifests = [name for name in ("pyproject.toml", "setup.py", "setup.cfg", "requirements.txt") if (checkout_root / name).is_file()]
+        return {"status": "ready", "runtime": "python", "image": "python:3.11-slim", "manifests": manifests, "network": "none", "repository_mount": "read_only", "dependency_install": "disabled"}
+
+
+class LimitedPocAgent:
+    """Generate harmless marker-based reproductions for a small allowlist of Python sinks."""
+    def run(self, audit_file: Path, finding: dict, environment: dict) -> Path:
+        audit_data, current = load_hypothesis(audit_file, finding["id"])
+        if current["path"] != finding["path"] or not finding.get("auto_reproduction_supported"):
+            raise ValueError("자동 PoC 허용 범위 밖의 후보입니다")
+        checkout_root = Path(audit_data["checkout"]).resolve()
+        source_file = (checkout_root / finding["path"]).resolve()
+        if not source_file.is_relative_to(checkout_root) or not source_file.is_file():
+            raise ValueError("PoC 대상 파일이 조사 체크아웃 안에 없습니다")
+        try:
+            syntax = ast.parse(source_file.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, SyntaxError) as exc:
+            raise ValueError("PoC 대상 Python 파일을 다시 분석할 수 없습니다") from exc
+        top_level = [node for node in syntax.body if isinstance(node, ast.FunctionDef) and node.name == finding["function"]]
+        if len(top_level) != 1:
+            raise ValueError("자동 PoC는 모듈 최상위 동기 함수만 호출합니다")
+        destination = audit_file.parent / finding["id"]
+        destination.mkdir(parents=True, exist_ok=True)
+        proof = destination / "proof.py"
+        manifest_path = destination / "manifest.json"
+        if proof.exists() or manifest_path.exists():
+            raise ValueError("기존 PoC 작업물이 있어 자동 생성으로 덮어쓰지 않습니다")
+        marker = "OSS_PROOF_" + secrets.token_hex(8)
+        kind = finding["kind"]
+        if kind == "command_injection":
+            attack_expression = '"printf " + MARKER'
+            control_expression = '"printf OSS_BENIGN_CONTROL"'
+        else:
+            sink_text = finding.get("sink_code", "")
+            attack_expression = '("print(" + repr(MARKER) + ")") if "exec(" in SINK else repr(MARKER)'
+            control_expression = '"None" if "exec(" in SINK else repr("OSS_BENIGN_CONTROL")'
+        script = f'''"""Auto-generated bounded reproduction for {finding["id"]}."""
+import importlib.util
+import inspect
+import os
+import sys
+
+REPO = os.environ["OSS_POC_REPO"]
+MARKER = {marker!r}
+SINK = {finding.get("sink_code", "")!r}
+
+class InputProxy:
+    def __init__(self, value):
+        self.value = value
+    def __getitem__(self, _key):
+        return self.value
+    def get(self, _key, default=None):
+        return self.value
+    def getlist(self, _key):
+        return [self.value]
+    def __getattr__(self, _name):
+        return self
+
+def drive(case):
+    value = {attack_expression} if case == "attack" else {control_expression}
+    target_path = os.path.join(REPO, {finding["path"]!r})
+    spec = importlib.util.spec_from_file_location("oss_target", target_path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    target = getattr(module, {finding["function"]!r})
+    arguments = []
+    for parameter in inspect.signature(target).parameters.values():
+        arguments.append(InputProxy(value) if parameter.name.lower() in {{"request", "req"}} else value)
+    result = target(*arguments)
+    output = getattr(result, "stdout", result)
+    if output is not None:
+        print(output)
+
+if __name__ == "__main__":
+    drive(sys.argv[1])
+'''
+        manifest = {"finding_id": finding["id"], "repo_path": audit_data["checkout"], "commit": audit_data["commit"], "image": environment["image"], "attack": ["python3", "proof.py", "attack"], "control": ["python3", "proof.py", "control"], "observable": {"type": "stdout_contains", "value": marker}, "timeout_seconds": 30, "generator": "bounded_python_v1"}
+        proof.write_text(script, encoding="utf-8")
+        manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+        return manifest_path
+
+
 def checkout(target: str, checkouts: Path) -> tuple[Path, str]:
     repo = repo_name(target)
     checkouts.mkdir(parents=True, exist_ok=True)
@@ -259,7 +362,7 @@ def _public_context(timeline_db: Path | None, repo: str) -> dict:
         connection = sqlite3.connect(f"file:{timeline_db.resolve()}?mode=ro", uri=True)
         connection.row_factory = sqlite3.Row
         row = connection.execute("SELECT last_sync,coverage FROM repositories WHERE name=?", (repo,)).fetchone()
-        known = [dict(x) for x in connection.execute("SELECT a.id,a.ghsa,a.cve,a.summary,a.published_at FROM advisories a JOIN advisory_repos ar ON ar.advisory_id=a.id WHERE ar.repo=? ORDER BY a.published_at DESC", (repo,))]
+        known = [dict(x) for x in connection.execute("SELECT a.id,a.ghsa,a.cve,a.summary,a.published_at,a.sources FROM advisories a JOIN advisory_repos ar ON ar.advisory_id=a.id WHERE ar.repo=? ORDER BY a.published_at DESC", (repo,))]
         connection.close()
         return {"status": "snapshot" if row else "repo_not_synced", "last_sync": row["last_sync"] if row else None, "coverage": json.loads(row["coverage"]) if row else {}, "known_advisories": known}
     except sqlite3.DatabaseError:
@@ -491,3 +594,134 @@ CVE ID: not assigned. Coordinate the request with the repository maintainer or a
         ghsa.write_text(description, encoding="utf-8")
         cve.write_text(cve_text, encoding="utf-8")
         return ghsa, cve
+
+
+class DuplicateReviewAgent:
+    """Compare a candidate with the collected public advisory snapshot; never submits externally."""
+    KEYWORDS = {
+        "command_injection": {"command", "shell", "injection", "CWE-78"},
+        "code_execution": {"code execution", "eval", "injection", "CWE-94"},
+        "unsafe_deserialization": {"deserialization", "pickle", "CWE-502"},
+        "possible_ssrf": {"SSRF", "server-side request", "CWE-918"},
+    }
+
+    def run(self, audit_data: dict, finding: dict) -> dict:
+        context = audit_data.get("public_context", {})
+        advisories = context.get("known_advisories", [])
+        if context.get("status") != "snapshot":
+            return {"status": "insufficient_public_context", "checked": 0, "matches": [], "scope": "수집된 GitHub·OSV 공개 공지 스냅샷", "manual_review_required": True}
+        terms = self.KEYWORDS.get(finding.get("kind"), {finding.get("kind", "")})
+        matches = []
+        for advisory in advisories:
+            haystack = " ".join(str(advisory.get(key) or "") for key in ("id", "ghsa", "cve", "summary", "sources")).lower()
+            if any(term and term.lower() in haystack for term in terms):
+                matches.append({key: advisory.get(key) for key in ("id", "ghsa", "cve", "summary", "sources")})
+        return {
+            "status": "possible_duplicate" if matches else "no_match_in_collected_snapshot",
+            "checked": len(advisories),
+            "matches": matches,
+            "scope": "수집된 GitHub·OSV 공개 공지 스냅샷",
+            "manual_review_required": True,
+        }
+
+
+def _automatic_claim(finding: dict, duplicate_review: dict) -> dict:
+    cwe = {"command_injection": "CWE-78", "code_execution": "CWE-94"}.get(finding["kind"], "CWE pending review")
+    label = {"command_injection": "Command injection", "code_execution": "Code execution"}.get(finding["kind"], finding["kind"])
+    claim = claim_template(finding)
+    matches = ", ".join(item.get("id") or item.get("ghsa") or item.get("cve") or "unknown" for item in duplicate_review["matches"])
+    duplicate_text = f"Potential matches require human comparison: {matches}" if matches else f'No keyword match among {duplicate_review["checked"]} collected advisories; broader manual search is still required.'
+    claim.update({
+        "title": f"{label} candidate in {finding['function']}",
+        "summary": f"A bounded offline reproduction reached the {finding['kind']} sink from the modeled external input path.",
+        "cwe": cwe,
+        "impact": "The isolated marker-based reproduction demonstrates control of the modeled dangerous operation. Real deployment reachability and impact require maintainer review.",
+        "root_cause": f"Input tracked from line {finding['source_line']} reaches the dangerous operation at line {finding['sink_line']} without a modeled transformation that removes attacker control.",
+        "default_configuration_evidence": "The analyzed code path invokes the recorded sink directly; deployment defaults were not changed by the harness.",
+        "upstream_guard_analysis": "The bounded semantic scan found no supported guard on this source-to-sink path. A maintainer must review framework middleware and callers.",
+        "negative_control_explanation": "The benign input completed without the unique attack marker; only the crafted input produced it.",
+        "remediation": "Avoid interpreting attacker-controlled text as code or a shell command; use fixed operations and validated structured arguments.",
+        "reproduction_steps": ["Use the pinned analyzed commit", "Run the supplied offline-container PoC verifier", "Compare benign and crafted observations"],
+    })
+    claim["affected"] = {"ecosystem": "source", "package": finding["repo"], "versions": f'analyzed commit {finding["commit"]}', "patched_version": "Not yet available"}
+    claim["source"]["attacker_control"] = "The scanner traced this expression from a modeled request, CLI, or route input."
+    claim["sink"]["effect"] = "The crafted value controls the recorded dangerous operation in the isolated reproduction."
+    claim["known_advisory_checks"] = {
+        "github": duplicate_text,
+        "osv": duplicate_text,
+        "vendor_or_web": "Not automatically queried beyond the collected snapshot; manual review is required before submission.",
+        "duplicate_analysis": duplicate_text,
+    }
+    return claim
+
+
+class ResearchOrchestrator:
+    """Run bounded reproduction stages and leave all external report submission to a human."""
+    def run(self, audit_file: Path, max_candidates: int = 3, local: bool = False) -> Path:
+        audit_data = json.loads(audit_file.read_text(encoding="utf-8"))
+        ranked = SemanticAnalysisAgent().run(audit_data.get("hypotheses", []))
+        results = []
+        for finding in ranked[:max_candidates]:
+            result = {"finding_id": finding["id"], "priority": finding["priority"], "stages": {}, "status": "blocked"}
+            result["stages"]["semantic_analysis"] = {"status": "ready" if finding["auto_reproduction_supported"] else "unsupported", "reason": finding["automation_reason"]}
+            if not finding["auto_reproduction_supported"]:
+                results.append(result)
+                continue
+            environment = BuildEnvironmentAgent().run(Path(audit_data["checkout"]), finding)
+            result["stages"]["build_environment"] = environment
+            if environment["status"] != "ready":
+                results.append(result)
+                continue
+            destination = audit_file.parent / finding["id"]
+            if (destination / "GHSA_CANDIDATE.md").is_file() and (destination / "CVE_REQUEST_BRIEF.md").is_file():
+                result.update(status="draft_ready", stages={**result["stages"], "disclosure": {"status": "already_generated", "submission": "manual_only"}})
+                results.append(result)
+                continue
+            try:
+                manifest_file = destination / "manifest.json"
+                if manifest_file.is_file():
+                    existing_manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
+                    reusable = existing_manifest.get("generator") == "bounded_python_v1" and existing_manifest.get("finding_id") == finding["id"] and existing_manifest.get("commit") == audit_data["commit"] and (destination / "proof.py").is_file()
+                    if not reusable:
+                        raise ValueError("기존 수동 PoC 작업물이 있어 자동 생성으로 덮어쓰지 않습니다")
+                    generation_status = "reused"
+                else:
+                    manifest_file = LimitedPocAgent().run(audit_file, finding, environment)
+                    generation_status = "generated"
+                result["stages"]["poc_generation"] = {"status": generation_status, "manifest": str(manifest_file)}
+                evidence_file = PocValidatorAgent().run(manifest_file, local=local)
+                evidence = json.loads(evidence_file.read_text(encoding="utf-8"))
+                result["stages"]["isolated_contrast"] = {"status": evidence["mechanical_result"], "mode": evidence["mode"], "evidence": str(evidence_file)}
+                if evidence["mechanical_result"] != "contrast_matched":
+                    result["status"] = "not_reproduced"
+                    results.append(result)
+                    continue
+                duplicate_review = DuplicateReviewAgent().run(audit_data, finding)
+                result["stages"]["duplicate_review"] = duplicate_review
+                if duplicate_review["status"] != "no_match_in_collected_snapshot":
+                    result["status"] = "duplicate_review_required"
+                    results.append(result)
+                    continue
+                claim = _automatic_claim(finding, duplicate_review)
+                claim_file = destination / "claim.json"
+                claim_file.write_text(json.dumps(claim, ensure_ascii=False, indent=2), encoding="utf-8")
+                ghsa, cve = DisclosureAgent().run(audit_file, finding["id"], claim_file, evidence_file)
+                result["stages"]["disclosure"] = {"status": "draft_generated", "ghsa": str(ghsa), "cve": str(cve), "submission": "manual_only"}
+                result["status"] = "draft_ready"
+            except (OSError, ValueError, RuntimeError, KeyError, json.JSONDecodeError) as exc:
+                result["stages"]["error"] = {"status": "blocked", "message": str(exc)[-500:]}
+            results.append(result)
+        summary = {
+            "repo": audit_data["repo"],
+            "commit": audit_data["commit"],
+            "audit_file": str(audit_file),
+            "execution_mode": "local_explicit" if local else "offline_container",
+            "external_submission": "disabled_manual_only",
+            "ranked_candidates": len(ranked),
+            "processed_candidates": len(results),
+            "results": results,
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        output = audit_file.parent / "orchestration.json"
+        output.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+        return output

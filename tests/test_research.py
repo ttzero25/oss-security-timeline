@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 
 from oss_timeline.core import Collection, Store
-from oss_timeline.research import DisclosureAgent, PocValidatorAgent, SourceScanAgent, audit, claim_template, prepare_poc
+from oss_timeline.research import DisclosureAgent, PocValidatorAgent, ResearchOrchestrator, SourceScanAgent, audit, claim_template, prepare_poc
 
 
 FIXTURE = Path(__file__).parent / "fixtures" / "synthetic_app.py"
@@ -101,6 +101,41 @@ print(result.stdout)
             context = json.loads(audit_file.read_text())["public_context"]
             self.assertEqual(context["status"], "snapshot")
             self.assertEqual(context["known_advisories"][0]["id"], "GHSA-aaaa-bbbb-cccc")
+
+    def test_orchestrator_generates_bounded_poc_and_manual_only_drafts(self):
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)
+            repo = self._checkout(folder)
+            database = folder / "timeline.sqlite3"
+            store = Store(database)
+            store.save(Collection("fixture/synthetic"))
+            store.db.close()
+            audit_file = audit(repo, "fixture/synthetic", folder / "research", timeline_db=database)
+            output = ResearchOrchestrator().run(audit_file, max_candidates=1, local=True)
+            result = json.loads(output.read_text())
+            self.assertEqual(result["external_submission"], "disabled_manual_only")
+            self.assertEqual(result["results"][0]["status"], "draft_ready")
+            self.assertEqual(result["results"][0]["stages"]["disclosure"]["submission"], "manual_only")
+            destination = audit_file.parent / result["results"][0]["finding_id"]
+            self.assertTrue((destination / "evidence.json").is_file())
+            self.assertTrue((destination / "GHSA_CANDIDATE.md").is_file())
+            self.assertTrue((destination / "CVE_REQUEST_BRIEF.md").is_file())
+
+    def test_orchestrator_stops_draft_for_possible_duplicate(self):
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)
+            repo = self._checkout(folder)
+            database = folder / "timeline.sqlite3"
+            store = Store(database)
+            collection = Collection("fixture/synthetic", advisories=[{"id": "GHSA-aaaa-bbbb-cccc", "ghsa": "GHSA-aaaa-bbbb-cccc", "cve": None, "published_at": "2026-01-01T00:00:00Z", "modified_at": None, "summary": "Command injection in request handling", "severity": "high", "cvss": None, "url": None, "source": "GitHub", "affected": []}])
+            store.save(collection)
+            store.db.close()
+            audit_file = audit(repo, "fixture/synthetic", folder / "research", timeline_db=database)
+            output = ResearchOrchestrator().run(audit_file, max_candidates=1, local=True)
+            result = json.loads(output.read_text())["results"][0]
+            self.assertEqual(result["status"], "duplicate_review_required")
+            self.assertEqual(result["stages"]["duplicate_review"]["status"], "possible_duplicate")
+            self.assertFalse((audit_file.parent / result["finding_id"] / "GHSA_CANDIDATE.md").exists())
 
 
 if __name__ == "__main__":

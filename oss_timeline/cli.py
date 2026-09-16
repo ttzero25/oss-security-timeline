@@ -8,7 +8,7 @@ import time
 from pathlib import Path
 
 from .core import ApiError, HttpClient, Store, repo_name, synchronize
-from .research import DisclosureAgent, PocValidatorAgent, audit, checkout, prepare_poc
+from .research import DisclosureAgent, PocValidatorAgent, ResearchOrchestrator, audit, checkout, prepare_poc
 
 
 def html_report(data: dict) -> str:
@@ -69,6 +69,14 @@ def main(argv: list[str] | None = None) -> int:
     research.add_argument("target", help="공개 GitHub URL 또는 로컬 체크아웃 경로")
     research.add_argument("--repo", help="로컬 경로의 owner/repo")
     research.add_argument("--max-files", type=int, default=20_000)
+    orchestrate = commands.add_parser("research-run", help="코드 조사부터 격리 PoC와 제보 초안까지 제한 자동화")
+    orchestrate.add_argument("target", help="공개 GitHub URL 또는 로컬 체크아웃 경로")
+    orchestrate.add_argument("--repo", help="로컬 경로의 owner/repo")
+    orchestrate.add_argument("--max-files", type=int, default=20_000)
+    orchestrate.add_argument("--max-candidates", type=int, default=3)
+    orchestrate.add_argument("--max-pages", type=int, default=100)
+    orchestrate.add_argument("--max-manifests", type=int, default=100)
+    orchestrate.add_argument("--local", action="store_true", help="격리 없이 로컬 실행: 신뢰하는 테스트 코드에만 사용")
     poc_init = commands.add_parser("poc-init", help="후보용 정상/공격 대조군 PoC 준비")
     poc_init.add_argument("audit_file", type=Path)
     poc_init.add_argument("finding_id")
@@ -85,11 +93,15 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("페이지 및 매니페스트 제한은 1 이상이어야 합니다")
     if args.command == "watch" and args.interval_hours < 1 / 60:
         parser.error("수집 간격은 1분 이상이어야 합니다")
-    if args.command == "audit" and args.max_files < 1:
+    if args.command in {"audit", "research-run"} and args.max_files < 1:
         parser.error("파일 조사 상한은 1 이상이어야 합니다")
-    if args.command in {"audit", "poc-init", "poc-verify", "disclosure"}:
+    if args.command == "research-run" and args.max_candidates < 1:
+        parser.error("후보 처리 상한은 1 이상이어야 합니다")
+    if args.command == "research-run" and (args.max_pages < 1 or args.max_manifests < 1):
+        parser.error("페이지 및 매니페스트 제한은 1 이상이어야 합니다")
+    if args.command in {"audit", "research-run", "poc-init", "poc-verify", "disclosure"}:
         try:
-            if args.command == "audit":
+            if args.command in {"audit", "research-run"}:
                 target_path = Path(args.target)
                 if target_path.is_dir():
                     if not args.repo:
@@ -97,10 +109,21 @@ def main(argv: list[str] | None = None) -> int:
                     repo = repo_name(args.repo)
                     root = target_path
                 else:
+                    if args.command == "research-run":
+                        store = Store(args.db)
+                        try:
+                            synchronize(HttpClient(), store, args.target, args.max_pages, args.max_manifests)
+                        finally:
+                            store.db.close()
                     root, repo = checkout(args.target, Path("data/checkouts"))
                 output = audit(root, repo, Path("data/research"), args.max_files, args.db)
                 summary = json.loads(output.read_text(encoding="utf-8"))
-                print(json.dumps({"audit_file": str(output), "repo": repo, "commit": summary["commit"], "hypotheses": len(summary["hypotheses"]), "coverage": summary["coverage"]}, ensure_ascii=False))
+                response = {"audit_file": str(output), "repo": repo, "commit": summary["commit"], "hypotheses": len(summary["hypotheses"]), "coverage": summary["coverage"]}
+                if args.command == "research-run":
+                    orchestration = ResearchOrchestrator().run(output, args.max_candidates, local=args.local)
+                    response["orchestration_file"] = str(orchestration)
+                    response["orchestration"] = json.loads(orchestration.read_text(encoding="utf-8"))
+                print(json.dumps(response, ensure_ascii=False))
             elif args.command == "poc-init":
                 print(prepare_poc(args.audit_file, args.finding_id))
             elif args.command == "poc-verify":
@@ -112,7 +135,7 @@ def main(argv: list[str] | None = None) -> int:
                 ghsa, cve = DisclosureAgent().run(args.audit_file, args.finding_id, args.claim, args.evidence)
                 print(json.dumps({"ghsa_draft": str(ghsa), "cve_brief": str(cve)}, ensure_ascii=False))
             return 0
-        except (ValueError, RuntimeError, OSError, json.JSONDecodeError, KeyError) as exc:
+        except (ApiError, ValueError, RuntimeError, OSError, json.JSONDecodeError, KeyError) as exc:
             print(str(exc), file=sys.stderr)
             return 1
     store = Store(args.db)

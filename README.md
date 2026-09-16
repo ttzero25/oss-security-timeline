@@ -11,8 +11,8 @@ GitHub 오픈소스 저장소의 변경과 공개 취약점 공지를 한 시간
 - 실험실의 보안 공지 표에는 GHSA/원본 식별자와 등록된 CVE를 별도 칸에 표시하고, 공지 원문에 명시된 CWE 유형만 보여줍니다.
 - 실험실은 공지의 영향 버전과 패치 버전을 비교하고, 공지가 같은 저장소의 커밋을 직접 참조하면 삭제·추가된 코드 줄을 나란히 보여줍니다. 이 참조만으로 해당 커밋이 완전한 fix라고 판정하지 않습니다.
 - 공개 변경 메시지와 Python·JavaScript/TypeScript·C/C++ 코드에서 검토 후보를 찾습니다. C/C++는 외부 입력이 셸 실행, 비상수 포맷 문자열, 위험 문자열 복사로 이어지는 보수적 패턴만 다룹니다. 후보는 취약점이나 제로데이 확정 결과가 아닙니다.
-- 완성된 PoC를 정상 입력과 공격 입력으로 비교한 뒤, 코드 경로·영향·기존 공지 중복 여부가 검토된 경우에만 제보 **초안**을 생성합니다. 외부 제출과 CVE/GHSA 번호 부여는 자동으로 하지 않습니다.
-- 로컬 웹의 Home에서 누적 탐지와 에이전트 역할을, 실험실에서 저장소별 조사 상태를, 정리에서 OSS별 요약을 확인할 수 있습니다. 관계망은 저장소–패키지–GHSA/CVE–CWE–fix 참조 커밋–코드 후보를 연결된 노드로 보여줍니다.
+- Research Orchestrator는 후보 우선순위화, 제한된 Python 코드 실행 후보의 실제 함수 호출 PoC 생성, 격리 대조 실행, 수집된 공개 공지 중복 점검을 연결합니다. 모든 게이트를 통과한 결과만 제보 **초안**으로 만들며 외부 제출과 CVE/GHSA 번호 부여는 자동으로 하지 않습니다.
+- 로컬 웹의 Home에서 누적 탐지와 에이전트 역할을, 실험실에서 저장소별 조사 상태를, 정리에서 OSS별 요약을 확인할 수 있습니다. 관계망은 데이터 연결을, 리포트는 CLI에서 생성된 검증 결과와 비공개 초안을 읽기 전용으로 보여줍니다.
 
 Python 3.11 이상이 필요합니다. 기본 CLI와 웹 화면에는 추가 Python 패키지가 필요하지 않습니다. 웹은 `GITHUB_TOKEN`이 없으면 설치·로그인된 GitHub CLI의 인증을 메모리에서만 활용합니다. 어느 쪽도 없으면 비인증 API 한도가 적용되므로 읽기용 토큰을 권장합니다. PoC의 기본 격리 실행에는 Docker 데몬과 미리 준비된 컨테이너 이미지가 필요합니다.
 
@@ -50,6 +50,12 @@ Python 3.11 이상이 필요합니다. 기본 CLI와 웹 화면에는 추가 Pyt
 
 `python3 -m oss_timeline audit https://github.com/owner/repo`는 공개 저장소의 최신 커밋을 새 로컬 디렉터리에 복제해 코드 가설을 `data/research/`에 기록합니다. 로컬 체크아웃은 `python3 -m oss_timeline audit /path/to/checkout --repo owner/repo`로 조사할 수 있습니다. 출력된 `audit.json`에서 후보 ID와 조사 범위를 확인합니다.
 
+지원되는 제한 자동화는 아래 명령으로 실행합니다. URL을 입력하면 먼저 공개 공지를 갱신해 중복 검토 스냅샷을 만든 뒤 코드를 조사합니다. 기본 PoC 실행은 네트워크가 차단되고 저장소가 읽기 전용으로 마운트된 컨테이너입니다. 안전한 자동 재현 템플릿이 없는 후보는 억지로 실행하지 않고 `orchestration.json`에 중단 사유를 남깁니다. `--local`은 테스트 픽스처처럼 신뢰하는 코드에만 사용합니다.
+
+```sh
+python3 -m oss_timeline research-run https://github.com/owner/repo --max-candidates 3
+```
+
 후보가 남으면 `poc-init`으로 `proof.py`, `manifest.json`, `claim.example.json`을 준비합니다. 조사한 커밋의 **실제 앱 경로**를 호출하도록 PoC를 완성하고, 정상 입력 대조군과 보안 영향을 명시한 `claim.json`을 작성하세요. `poc-verify`는 기본적으로 네트워크가 없는 읽기 전용 컨테이너에서 두 입력을 실행합니다. `--local`은 신뢰할 수 있는 테스트 코드에만 사용합니다. 재현 결과와 코드 인용이 같은 커밋에 맞고, 기존 공지 조사 근거가 채워지면 `disclosure`가 `GHSA_CANDIDATE.md`와 `CVE_REQUEST_BRIEF.md`를 만듭니다.
 
 ```sh
@@ -60,13 +66,13 @@ python3 -m oss_timeline disclosure path/to/audit.json FIND-XXXXXXXXXXXX \
   --evidence path/to/FIND-XXXXXXXXXXXX/evidence.json
 ```
 
-두 파일은 로컬의 비공개 제출용 초안입니다. 보고 전 코드 경로와 PoC가 같은 문제를 입증하는지 사람이 검토하고, [GitHub 비공개 취약점 제보](https://docs.github.com/en/code-security/how-tos/report-and-fix-vulnerabilities/report-privately) 또는 프로젝트 보안 정책을 따르세요. CVE 번호는 [관리자 또는 해당 CNA 절차](https://docs.github.com/en/code-security/concepts/vulnerability-reporting-and-management/repository-security-advisories)에 따라 요청합니다.
+두 파일은 로컬의 비공개 제출용 초안이며 웹의 `리포트` 탭에도 자동으로 나타납니다. 웹은 파일을 읽기만 하고 실행·수정·제출하지 않습니다. 보고 전 코드 경로와 PoC가 같은 문제를 입증하는지 사람이 검토하고, [GitHub 비공개 취약점 제보](https://docs.github.com/en/code-security/how-tos/report-and-fix-vulnerabilities/report-privately) 또는 프로젝트 보안 정책을 따라 직접 제출하세요. CVE 번호는 [관리자 또는 해당 CNA 절차](https://docs.github.com/en/code-security/concepts/vulnerability-reporting-and-management/repository-security-advisories)에 따라 요청합니다.
 
 ## 프로젝트 구조
 
 | 위치 | 내용 |
 | --- | --- |
-| [agents](agents/README.md) | 7개 역할별 입력·출력과 실행 흐름 |
+| [agents](agents/README.md) | 8개 역할별 입력·출력과 실행 흐름 |
 | [tools](tools/README.md) | CLI 안내와 로컬 수집·조회 웹 도구 |
 | [rules](rules/README.md) | 코드 탐지, PoC 검증, 비공개 제보 기준 |
 | [troubleshooting](troubleshooting/README.md) | API 제한·Docker·수집 누락 등의 해결 방법 |
@@ -74,7 +80,7 @@ python3 -m oss_timeline disclosure path/to/audit.json FIND-XXXXXXXXXXXX \
 | `tests/` | 수집·중복 제거·PoC·제보 게이트 회귀 검사 |
 | `data/` | 실행 중 생성되는 DB, 복제본, PoC, 비공개 초안; Git 제외 |
 
-공개 데이터 흐름은 `InventoryAgent → (ChangeAgent + AdvisoryAgent 병렬) → CandidateAgent`입니다. 코드 조사 흐름은 `SourceScanAgent → PocValidatorAgent → DisclosureAgent`입니다. 이 역할들은 현재 결정적인 Python 모듈이며 독립적으로 판단하는 LLM 에이전트는 아닙니다.
+공개 데이터 흐름은 `InventoryAgent → (ChangeAgent + AdvisoryAgent 병렬) → CandidateAgent`입니다. 코드 조사 흐름은 `SourceScanAgent → ResearchOrchestrator → PocValidatorAgent → DisclosureAgent`입니다. 이 역할들은 재현 가능한 Python 모듈이며, 지원 범위를 벗어난 후보는 사람의 분석 대상으로 남깁니다.
 
 ## 결과를 해석할 때
 
