@@ -1,0 +1,11 @@
+[project]
+name = "oss-security-timeline"
+version = "0.1.0"
+description = "Public open-source security timeline and advisory analytics"
+requires-python = ">=3.11"
+
+[project.scripts]
+oss-timeline = "oss_timeline.cli:main"
+
+[tool.setuptools]
+packages = ["oss_timeline"]
