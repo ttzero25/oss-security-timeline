@@ -434,6 +434,9 @@ class Store:
             CREATE TABLE IF NOT EXISTS advisory_packages (advisory_id TEXT NOT NULL, repo TEXT NOT NULL, ecosystem TEXT NOT NULL, name TEXT NOT NULL, version_range TEXT, patched TEXT, PRIMARY KEY(advisory_id, repo, ecosystem, name));
             CREATE TABLE IF NOT EXISTS events (repo TEXT NOT NULL, id TEXT NOT NULL, kind TEXT NOT NULL, at TEXT NOT NULL, title TEXT, url TEXT, first_seen TEXT NOT NULL, PRIMARY KEY(repo, id));
             CREATE TABLE IF NOT EXISTS findings (repo TEXT NOT NULL, id TEXT NOT NULL, at TEXT NOT NULL, title TEXT, url TEXT, reasons TEXT, paths TEXT NOT NULL DEFAULT '[]', evidence TEXT NOT NULL DEFAULT '[]', status TEXT, PRIMARY KEY(repo, id));
+            CREATE TABLE IF NOT EXISTS research_runs (repo TEXT NOT NULL, commit_hash TEXT NOT NULL, started_at TEXT NOT NULL, finished_at TEXT NOT NULL, status TEXT NOT NULL, execution_mode TEXT NOT NULL, coverage TEXT NOT NULL, profile TEXT NOT NULL, summary_path TEXT NOT NULL, PRIMARY KEY(repo,commit_hash));
+            CREATE TABLE IF NOT EXISTS research_findings (repo TEXT NOT NULL, tracking_id TEXT NOT NULL, finding_id TEXT NOT NULL, commit_hash TEXT NOT NULL, kind TEXT NOT NULL, path TEXT NOT NULL, source_line INTEGER, sink_line INTEGER, priority INTEGER, status TEXT NOT NULL, first_seen TEXT NOT NULL, last_seen TEXT NOT NULL, PRIMARY KEY(repo,tracking_id));
+            CREATE TABLE IF NOT EXISTS research_events (event_id TEXT PRIMARY KEY, repo TEXT NOT NULL, tracking_id TEXT, finding_id TEXT, commit_hash TEXT NOT NULL, at TEXT NOT NULL, kind TEXT NOT NULL, status TEXT NOT NULL, detail TEXT NOT NULL);
         """)
         columns = {x["name"] for x in self.db.execute("PRAGMA table_info(findings)")}
         if "paths" not in columns:
@@ -488,13 +491,35 @@ class Store:
             coverage = {}
         return row["last_sync"], bool(coverage.get("commit"))
 
+    def save_research(self, audit_data: dict, orchestration: dict, summary_path: Path) -> None:
+        repo = repo_name(audit_data["repo"])
+        commit = str(audit_data["commit"])
+        stamp = orchestration.get("generated_at") or now()
+        results = {item["finding_id"]: item for item in orchestration.get("results", [])}
+        statuses = [item.get("status") for item in results.values()]
+        run_status = "draft_ready" if "draft_ready" in statuses else "candidates" if audit_data.get("hypotheses") else "no_candidates"
+        with self.db:
+            self.db.execute("INSERT INTO research_runs(repo,commit_hash,started_at,finished_at,status,execution_mode,coverage,profile,summary_path) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(repo,commit_hash) DO UPDATE SET finished_at=excluded.finished_at,status=excluded.status,execution_mode=excluded.execution_mode,coverage=excluded.coverage,profile=excluded.profile,summary_path=excluded.summary_path", (repo, commit, audit_data.get("generated_at") or stamp, stamp, run_status, orchestration.get("execution_mode", "unknown"), json.dumps(audit_data.get("coverage", {}), ensure_ascii=False), json.dumps(audit_data.get("profile", {}), ensure_ascii=False), str(summary_path)))
+            run_event = hashlib.sha256(f"{repo}|{commit}|scan_completed|{run_status}".encode()).hexdigest()
+            self.db.execute("INSERT OR IGNORE INTO research_events VALUES(?,?,?,?,?,?,?,?,?)", (run_event, repo, None, None, commit, stamp, "research_scan", run_status, json.dumps({"hypotheses": len(audit_data.get("hypotheses", [])), "coverage": audit_data.get("coverage", {})}, ensure_ascii=False)))
+            for finding in audit_data.get("hypotheses", []):
+                tracking_id = finding.get("tracking_id") or finding["id"]
+                result = results.get(finding["id"], {})
+                status = result.get("status", "hypothesis")
+                existing = self.db.execute("SELECT first_seen FROM research_findings WHERE repo=? AND tracking_id=?", (repo, tracking_id)).fetchone()
+                first_seen = existing["first_seen"] if existing else stamp
+                self.db.execute("INSERT INTO research_findings(repo,tracking_id,finding_id,commit_hash,kind,path,source_line,sink_line,priority,status,first_seen,last_seen) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(repo,tracking_id) DO UPDATE SET finding_id=excluded.finding_id,commit_hash=excluded.commit_hash,kind=excluded.kind,path=excluded.path,source_line=excluded.source_line,sink_line=excluded.sink_line,priority=excluded.priority,status=excluded.status,last_seen=excluded.last_seen", (repo, tracking_id, finding["id"], commit, finding.get("kind", "unknown"), finding.get("path", ""), finding.get("source_line"), finding.get("sink_line"), result.get("priority"), status, first_seen, stamp))
+                for event_kind, event_status, detail in (("candidate_observed", "hypothesis", {"path": finding.get("path"), "sink_line": finding.get("sink_line")}), ("research_verdict", status, result.get("stages", {}))):
+                    event_id = hashlib.sha256(f"{repo}|{commit}|{tracking_id}|{event_kind}|{event_status}".encode()).hexdigest()
+                    self.db.execute("INSERT OR IGNORE INTO research_events VALUES(?,?,?,?,?,?,?,?,?)", (event_id, repo, tracking_id, finding["id"], commit, stamp, event_kind, event_status, json.dumps(detail, ensure_ascii=False)))
+
     def report(self, repo: str | None = None, limit: int = 300) -> dict:
         repositories = [dict(x) for x in self.db.execute("SELECT * FROM repositories ORDER BY name") if repo is None or x["name"] == repo]
         if repo and not repositories:
             raise ValueError("저장되지 않은 저장소입니다")
         scope = [x["name"] for x in repositories]
         if not scope:
-            return {"repositories": [], "ranking": [], "packages": [], "fix_versions": [], "timeline": [], "findings": [], "advisory_observations": [], "forecast": {"status": "insufficient_data"}}
+            return {"repositories": [], "ranking": [], "packages": [], "fix_versions": [], "timeline": [], "findings": [], "advisory_observations": [], "research_timeline": [], "research_runs": [], "forecast": {"status": "insufficient_data"}}
         marks = ",".join("?" for _ in scope)
         ranking = [dict(x) for x in self.db.execute(f"SELECT repo,COUNT(DISTINCT advisory_id) AS advisories FROM advisory_repos WHERE repo IN ({marks}) GROUP BY repo ORDER BY advisories DESC,repo", scope)]
         packages = [dict(x) for x in self.db.execute(f"SELECT repo,ecosystem,name,COUNT(DISTINCT advisory_id) AS advisories FROM advisory_packages WHERE repo IN ({marks}) GROUP BY repo,ecosystem,name ORDER BY advisories DESC,repo,name", scope)]
@@ -513,7 +538,14 @@ class Store:
             item["cwe_ids"] = json.loads(item["cwe_ids"]) if item["cwe_ids"] else []
             item["cwe_names"] = json.loads(item["cwe_names"]) if item["cwe_names"] else {}
         observations = [dict(x) for x in self.db.execute(f"SELECT ao.advisory_id,ao.observed_at,ao.modified_at,ar.repo FROM advisory_observations ao JOIN advisory_repos ar ON ar.advisory_id=ao.advisory_id WHERE ar.repo IN ({marks}) ORDER BY ao.observed_at DESC LIMIT ?", [*scope, limit])]
-        return {"generated_at": now(), "repositories": repositories, "ranking": ranking, "packages": packages, "fix_versions": fix_versions, "timeline": timeline, "findings": findings, "advisory_observations": observations, "forecast": forecast(publications)}
+        research_timeline = [dict(x) for x in self.db.execute(f"SELECT * FROM research_events WHERE repo IN ({marks}) ORDER BY at DESC LIMIT ?", [*scope, limit])]
+        research_runs = [dict(x) for x in self.db.execute(f"SELECT * FROM research_runs WHERE repo IN ({marks}) ORDER BY finished_at DESC", scope)]
+        for item in research_timeline:
+            item["detail"] = json.loads(item["detail"])
+        for item in research_runs:
+            item["coverage"] = json.loads(item["coverage"])
+            item["profile"] = json.loads(item["profile"])
+        return {"generated_at": now(), "repositories": repositories, "ranking": ranking, "packages": packages, "fix_versions": fix_versions, "timeline": timeline, "findings": findings, "advisory_observations": observations, "research_timeline": research_timeline, "research_runs": research_runs, "forecast": forecast(publications)}
 
 
 def synchronize(client: HttpClient, store: Store, repo: str, max_pages: int = 100, max_manifests: int = 100) -> Collection:

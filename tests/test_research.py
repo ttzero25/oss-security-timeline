@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 
 from oss_timeline.core import Collection, Store
-from oss_timeline.research import DisclosureAgent, PocValidatorAgent, ResearchOrchestrator, SourceScanAgent, audit, claim_template, prepare_poc
+from oss_timeline.research import DisclosureAgent, PocValidatorAgent, RepositoryProfilerAgent, ResearchOrchestrator, SourceScanAgent, audit, claim_template, prepare_poc
 
 
 FIXTURE = Path(__file__).parent / "fixtures" / "synthetic_app.py"
@@ -36,6 +36,31 @@ class ResearchTests(unittest.TestCase):
         self.assertEqual({x.kind for x in native}, {"command_injection", "format_string"})
         self.assertEqual(len(native), 2)
         self.assertIn("c/c++", coverage["languages"])
+
+    def test_python_scan_traces_one_same_module_helper_hop(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "app.py").write_text('''import subprocess\n\nclass App:\n    def post(self, path):\n        return lambda fn: fn\napp = App()\n\ndef execute(value):\n    return subprocess.run(value, shell=True)\n\n@app.post("/run")\ndef route(command):\n    return execute(command)\n''', encoding="utf-8")
+            findings, _ = SourceScanAgent().run(root, "fixture/interprocedural", "c" * 40)
+            linked = [item for item in findings if item.function == "route" and item.source_line != item.sink_line]
+            self.assertEqual(len(linked), 1)
+            self.assertEqual(linked[0].kind, "command_injection")
+
+    def test_repository_profile_records_packages_languages_and_entrypoints(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            shutil.copyfile(FIXTURE, root / "app.py")
+            (root / "pyproject.toml").write_text('[project]\nname="fixture"\ndependencies=["requests>=2"]\n', encoding="utf-8")
+            (root / "poetry.lock").write_text("", encoding="utf-8")
+            (root / "worker.go").write_text("package main\nfunc main() {}\n", encoding="utf-8")
+            profile = RepositoryProfilerAgent().run(root)
+            self.assertEqual(profile["languages"]["python"], 1)
+            self.assertEqual(profile["languages"]["go"], 1)
+            self.assertEqual(profile["manifests"], ["pyproject.toml"])
+            self.assertEqual(profile["lockfiles"], ["poetry.lock"])
+            self.assertEqual(profile["dependency_count"], 1)
+            self.assertEqual(profile["dependencies"][0]["name"], "requests")
+            self.assertTrue({item["kind"] for item in profile["entrypoints"]} >= {"http", "cli"})
 
     def test_poc_controls_and_disclosure_gate(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -112,7 +137,7 @@ print(result.stdout)
             store.save(Collection("fixture/synthetic"))
             store.db.close()
             audit_file = audit(repo, "fixture/synthetic", folder / "research", timeline_db=database)
-            output = ResearchOrchestrator().run(audit_file, max_candidates=1)
+            output = ResearchOrchestrator().run(audit_file, max_candidates=1, timeline_db=database)
             result = json.loads(output.read_text())
             self.assertEqual(result["external_submission"], "disabled_manual_only")
             self.assertEqual(result["results"][0]["status"], "draft_ready")
@@ -121,6 +146,11 @@ print(result.stdout)
             self.assertTrue((destination / "evidence.json").is_file())
             self.assertTrue((destination / "GHSA_CANDIDATE.md").is_file())
             self.assertTrue((destination / "CVE_REQUEST_BRIEF.md").is_file())
+            store = Store(database)
+            timeline = store.report("fixture/synthetic")
+            self.assertEqual(timeline["research_runs"][0]["status"], "draft_ready")
+            self.assertTrue(any(item["kind"] == "research_verdict" for item in timeline["research_timeline"]))
+            store.db.close()
 
     def test_orchestrator_stops_draft_for_possible_duplicate(self):
         with tempfile.TemporaryDirectory() as temp:

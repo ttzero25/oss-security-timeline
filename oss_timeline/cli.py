@@ -120,7 +120,7 @@ def main(argv: list[str] | None = None) -> int:
                 summary = json.loads(output.read_text(encoding="utf-8"))
                 response = {"audit_file": str(output), "repo": repo, "commit": summary["commit"], "hypotheses": len(summary["hypotheses"]), "coverage": summary["coverage"]}
                 if args.command == "research-run":
-                    orchestration = ResearchOrchestrator().run(output, args.max_candidates, container=args.container)
+                    orchestration = ResearchOrchestrator().run(output, args.max_candidates, container=args.container, timeline_db=args.db)
                     response["orchestration_file"] = str(orchestration)
                     response["orchestration"] = json.loads(orchestration.read_text(encoding="utf-8"))
                 print(json.dumps(response, ensure_ascii=False))

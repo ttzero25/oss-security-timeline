@@ -3,6 +3,7 @@
   {"name":"ChangeAgent","lane":"timeline","purpose":"Collect releases and commits","code":"oss_timeline/core.py"},
   {"name":"AdvisoryAgent","lane":"timeline","purpose":"Collect repository, GitHub and OSV advisories","code":"oss_timeline/core.py"},
   {"name":"CandidateAgent","lane":"timeline","purpose":"Triage public security-related changes for review","code":"oss_timeline/core.py"},
+  {"name":"RepositoryProfilerAgent","lane":"research","purpose":"Map repository languages, package files, lockfiles and entry points","code":"oss_timeline/research.py"},
   {"name":"SourceScanAgent","lane":"research","purpose":"Find source-to-sink hypotheses in a checkout","code":"oss_timeline/research.py"},
   {"name":"ResearchOrchestrator","lane":"research","purpose":"Prioritize candidates and coordinate bounded isolated reproduction","code":"oss_timeline/research.py"},
   {"name":"PocValidatorAgent","lane":"research","purpose":"Compare benign and attack PoC observations","code":"oss_timeline/research.py"},

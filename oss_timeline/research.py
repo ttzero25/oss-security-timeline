@@ -11,11 +11,12 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import tomllib
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .core import repo_name
+from .core import Store, repo_name
 
 
 IGNORED_DIRS = {".git", ".venv", "venv", "node_modules", "dist", "build", "vendor", "__pycache__"}
@@ -32,11 +33,66 @@ C_SINKS = [
     ("format_string", re.compile(r"\b(?:printf|syslog)\s*\(([^;]*)")),
     ("unsafe_copy", re.compile(r"\b(?:strcpy|strcat|sprintf|vsprintf)\s*\(([^;]*)")),
 ]
+PROFILE_MANIFESTS = {"package.json", "pyproject.toml", "setup.py", "setup.cfg", "Cargo.toml", "go.mod", "composer.json", "pom.xml", "build.gradle", "build.gradle.kts", "CMakeLists.txt", "Makefile"}
+PROFILE_LOCKFILES = {"package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml", "poetry.lock", "Pipfile.lock", "uv.lock", "Cargo.lock", "go.sum", "composer.lock", "gradle.lockfile"}
+LANGUAGE_SUFFIXES = {".py": "python", ".js": "javascript", ".mjs": "javascript", ".cjs": "javascript", ".ts": "typescript", ".mts": "typescript", ".cts": "typescript", ".c": "c", ".h": "c/c++", ".cc": "c/c++", ".cpp": "c/c++", ".cxx": "c/c++", ".hpp": "c/c++", ".go": "go", ".rs": "rust", ".java": "java", ".kt": "kotlin", ".php": "php", ".rb": "ruby"}
+ENTRY_PATTERNS = [
+    ("http", re.compile(r"@\w+(?:\.\w+)*\.(?:route|get|post|put|patch|delete)\s*\(|\b(?:app|router)\.(?:get|post|put|patch|delete|use)\s*\(|@(?:Get|Post|Put|Patch|Delete|Request)Mapping\b")),
+    ("cli", re.compile(r"if\s+__name__\s*==\s*['\"]__main__['\"]|\bfunc\s+main\s*\(|\bint\s+main\s*\(|\bconsole_scripts\b")),
+    ("message", re.compile(r"\b(?:subscribe|consumer|on_message|addEventListener)\s*\(")),
+]
+
+
+def _dependency_records(filename: str, text: str, path: str) -> list[dict]:
+    records = []
+    try:
+        if filename in {"package.json", "package-lock.json"}:
+            data = json.loads(text)
+            if filename == "package.json":
+                for section in ("dependencies", "optionalDependencies", "peerDependencies", "devDependencies"):
+                    for name, version in (data.get(section) or {}).items():
+                        records.append({"ecosystem": "npm", "name": name, "version": str(version), "source": path, "scope": section})
+            else:
+                for key, value in (data.get("packages") or {}).items():
+                    if key and "/node_modules/" in "/" + key and isinstance(value, dict):
+                        package_name = value.get("name") or key.rsplit("node_modules/", 1)[-1]
+                        records.append({"ecosystem": "npm", "name": package_name, "version": str(value.get("version") or ""), "source": path, "scope": "lock"})
+        elif filename == "pyproject.toml":
+            data = tomllib.loads(text)
+            for requirement in (data.get("project", {}).get("dependencies") or []):
+                match = re.match(r"\s*([A-Za-z0-9_.-]+)", requirement)
+                if match:
+                    records.append({"ecosystem": "pip", "name": match.group(1), "version": requirement[len(match.group(0)):].strip(), "source": path, "scope": "direct"})
+            for name, version in (data.get("tool", {}).get("poetry", {}).get("dependencies") or {}).items():
+                if name.lower() != "python":
+                    records.append({"ecosystem": "pip", "name": name, "version": str(version), "source": path, "scope": "direct"})
+        elif filename == "Cargo.lock":
+            for package in tomllib.loads(text).get("package", []):
+                records.append({"ecosystem": "rust", "name": package.get("name", ""), "version": str(package.get("version") or ""), "source": path, "scope": "lock"})
+        elif filename == "go.sum":
+            seen = set()
+            for line in text.splitlines():
+                parts = line.split()
+                if len(parts) >= 2 and parts[0] not in seen:
+                    seen.add(parts[0])
+                    records.append({"ecosystem": "go", "name": parts[0], "version": parts[1].removesuffix("/go.mod"), "source": path, "scope": "lock"})
+        elif filename.startswith("requirements") and filename.endswith(".txt"):
+            for line in text.splitlines():
+                value = line.strip()
+                if not value or value.startswith(("#", "-")):
+                    continue
+                match = re.match(r"([A-Za-z0-9_.-]+)(.*)", value)
+                if match:
+                    records.append({"ecosystem": "pip", "name": match.group(1), "version": match.group(2).strip(), "source": path, "scope": "direct"})
+    except (json.JSONDecodeError, tomllib.TOMLDecodeError, TypeError, AttributeError):
+        return []
+    return [item for item in records if item.get("name")]
 
 
 @dataclass
 class Hypothesis:
     id: str
+    tracking_id: str
     repo: str
     commit: str
     kind: str
@@ -89,7 +145,66 @@ def _sink_kind(node: ast.Call) -> tuple[str, ast.AST] | None:
 
 def _hypothesis(repo: str, commit: str, kind: str, path: str, source_line: int, sink_line: int, source_code: str, sink_code: str, function: str) -> Hypothesis:
     identity = f"{repo}|{commit}|{kind}|{path}|{source_line}|{sink_line}"
-    return Hypothesis("FIND-" + hashlib.sha256(identity.encode()).hexdigest()[:12].upper(), repo, commit, kind, path, source_line, sink_line, source_code.strip()[:400], sink_code.strip()[:400], function)
+    stable = f"{repo}|{kind}|{path}|{function}|{source_code.strip()}|{sink_code.strip()}"
+    return Hypothesis("FIND-" + hashlib.sha256(identity.encode()).hexdigest()[:12].upper(), "TRACK-" + hashlib.sha256(stable.encode()).hexdigest()[:12].upper(), repo, commit, kind, path, source_line, sink_line, source_code.strip()[:400], sink_code.strip()[:400], function)
+
+
+class RepositoryProfilerAgent:
+    """Build a bounded repository/package/entry-point coverage ledger."""
+    def run(self, root: Path, max_files: int = 50_000) -> dict:
+        root = root.resolve()
+        languages: dict[str, int] = {}
+        manifests, lockfiles, entrypoints, dependencies = [], [], [], []
+        files_seen = code_files = unsupported_code_files = oversized = 0
+        truncated = False
+        for filename in root.rglob("*"):
+            try:
+                relative = filename.relative_to(root)
+                if any(part in IGNORED_DIRS for part in relative.parts) or not filename.is_file() or filename.is_symlink():
+                    continue
+                files_seen += 1
+                if files_seen > max_files:
+                    truncated = True
+                    break
+                size = filename.stat().st_size
+            except OSError:
+                continue
+            name, suffix, path = filename.name, filename.suffix.lower(), relative.as_posix()
+            if name in PROFILE_MANIFESTS:
+                manifests.append(path)
+            is_requirement = name.startswith("requirements") and name.endswith(".txt")
+            if name in PROFILE_LOCKFILES or is_requirement:
+                lockfiles.append(path)
+            if (name in PROFILE_MANIFESTS or name in PROFILE_LOCKFILES or is_requirement) and size <= 5_000_000 and len(dependencies) < 5_000:
+                try:
+                    dependencies.extend(_dependency_records(name, filename.read_text(encoding="utf-8", errors="replace"), path)[: 5_000 - len(dependencies)])
+                except OSError:
+                    pass
+            language = LANGUAGE_SUFFIXES.get(suffix)
+            if not language:
+                continue
+            code_files += 1
+            languages[language] = languages.get(language, 0) + 1
+            if suffix not in {".py", ".js", ".mjs", ".cjs", ".ts", ".mts", ".cts", *C_EXTENSIONS}:
+                unsupported_code_files += 1
+            if size > 500_000:
+                oversized += 1
+                continue
+            try:
+                lines = filename.read_text(encoding="utf-8", errors="replace").splitlines()
+            except OSError:
+                continue
+            for number, line in enumerate(lines, 1):
+                if len(entrypoints) >= 500:
+                    break
+                for kind, pattern in ENTRY_PATTERNS:
+                    if pattern.search(line):
+                        entrypoints.append({"kind": kind, "path": path, "line": number, "code": line.strip()[:240]})
+                        break
+        ecosystem_counts: dict[str, int] = {}
+        for item in dependencies:
+            ecosystem_counts[item["ecosystem"]] = ecosystem_counts.get(item["ecosystem"], 0) + 1
+        return {"files_seen": min(files_seen, max_files), "code_files": code_files, "unsupported_code_files": unsupported_code_files, "oversized_code_files": oversized, "languages": dict(sorted(languages.items(), key=lambda item: (-item[1], item[0]))), "manifests": sorted(manifests), "lockfiles": sorted(lockfiles), "dependencies": dependencies, "dependency_count": len(dependencies), "dependency_ecosystems": ecosystem_counts, "dependencies_truncated": len(dependencies) >= 5_000, "entrypoints": entrypoints, "entrypoints_truncated": len(entrypoints) >= 500, "truncated": truncated, "scope": "default branch checkout excluding generated/vendor directories"}
 
 
 def _python_hypotheses(filename: Path, root: Path, repo: str, commit: str) -> list[Hypothesis]:
@@ -135,6 +250,72 @@ def _python_hypotheses(filename: Path, root: Path, repo: str, commit: str) -> li
                     source = next((assigned[name] for name in _name_refs(argument) if name in assigned), None)
                 if source:
                     output.append(_hypothesis(repo, commit, kind, path, source[0], node.lineno, source[1], lines[node.lineno - 1], function.name))
+    return output
+
+
+def _python_interprocedural_hypotheses(filename: Path, root: Path, repo: str, commit: str) -> list[Hypothesis]:
+    """Trace modeled external input through one same-module helper call."""
+    try:
+        text = filename.read_text(encoding="utf-8")
+        tree = ast.parse(text)
+    except (OSError, UnicodeError, SyntaxError):
+        return []
+    lines = text.splitlines()
+    functions = [node for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))]
+    summaries: dict[str, list[dict]] = {}
+    for function in functions:
+        parameters = [argument.arg for argument in function.args.posonlyargs + function.args.args + function.args.kwonlyargs]
+        origins = {name: name for name in parameters}
+        for node in ast.walk(function):
+            if isinstance(node, (ast.Assign, ast.AnnAssign)) and node.value is not None:
+                origin = next((origins[name] for name in _name_refs(node.value) if name in origins), None)
+                if origin:
+                    targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                    for target in targets:
+                        for sub in ast.walk(target):
+                            if isinstance(sub, ast.Name):
+                                origins[sub.id] = origin
+            if isinstance(node, ast.Call) and (sink := _sink_kind(node)):
+                kind, argument = sink
+                parameter = next((origins[name] for name in _name_refs(argument) if name in origins), None)
+                if parameter:
+                    summaries.setdefault(function.name, []).append({"parameter": parameter, "kind": kind, "sink_line": node.lineno, "sink_code": lines[node.lineno - 1]})
+    output = []
+    path = filename.relative_to(root).as_posix()
+    for caller in functions:
+        external: dict[str, tuple[int, str]] = {}
+        http_route = any(isinstance(decorator, ast.Call) and _qualified(decorator.func).rsplit(".", 1)[-1] in {"route", "get", "post", "put", "patch", "delete"} for decorator in caller.decorator_list)
+        if http_route:
+            for argument in caller.args.posonlyargs + caller.args.args + caller.args.kwonlyargs:
+                if argument.arg not in {"self", "cls", "request"}:
+                    external[argument.arg] = (caller.lineno, lines[caller.lineno - 1])
+        for node in ast.walk(caller):
+            if isinstance(node, (ast.Assign, ast.AnnAssign)) and node.value is not None:
+                origin = (node.value.lineno, lines[node.value.lineno - 1]) if _request_source(node.value) else next((external[name] for name in _name_refs(node.value) if name in external), None)
+                if origin:
+                    targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                    for target in targets:
+                        for sub in ast.walk(target):
+                            if isinstance(sub, ast.Name):
+                                external[sub.id] = origin
+            if not isinstance(node, ast.Call):
+                continue
+            callee = _qualified(node.func)
+            if callee not in summaries or callee == caller.name:
+                continue
+            helper = next((item for item in functions if item.name == callee), None)
+            if not helper:
+                continue
+            parameter_names = [argument.arg for argument in helper.args.posonlyargs + helper.args.args + helper.args.kwonlyargs]
+            supplied = {parameter_names[index]: value for index, value in enumerate(node.args) if index < len(parameter_names)}
+            supplied.update({keyword.arg: keyword.value for keyword in node.keywords if keyword.arg})
+            for summary in summaries[callee]:
+                argument = supplied.get(summary["parameter"])
+                if argument is None:
+                    continue
+                source = (argument.lineno, lines[argument.lineno - 1]) if _request_source(argument) else next((external[name] for name in _name_refs(argument) if name in external), None)
+                if source:
+                    output.append(_hypothesis(repo, commit, summary["kind"], path, source[0], summary["sink_line"], source[1], summary["sink_code"], caller.name))
     return output
 
 
@@ -229,6 +410,7 @@ class SourceScanAgent:
                 break
             if filename.suffix == ".py":
                 output.extend(_python_hypotheses(filename, root, repo, commit))
+                output.extend(_python_interprocedural_hypotheses(filename, root, repo, commit))
             elif filename.suffix in C_EXTENSIONS:
                 output.extend(_c_hypotheses(filename, root, repo, commit))
             else:
@@ -374,10 +556,13 @@ def _public_context(timeline_db: Path | None, repo: str) -> dict:
 def audit(root: Path, repo: str, output_root: Path, max_files: int = 20_000, timeline_db: Path | None = None) -> Path:
     canonical = repo_name(repo)
     commit = commit_hash(root)
+    profile = RepositoryProfilerAgent().run(root, max(max_files, 50_000))
     findings, coverage = SourceScanAgent().run(root, canonical, commit, max_files)
     destination = output_root / canonical.replace("/", "_") / commit
     destination.mkdir(parents=True, exist_ok=True)
-    summary = {"repo": canonical, "commit": commit, "checkout": str(root.resolve()), "coverage": coverage, "public_context": _public_context(timeline_db, canonical), "hypotheses": [asdict(x) for x in findings], "generated_at": datetime.now(timezone.utc).isoformat()}
+    coverage["repository_profile_complete"] = not profile["truncated"]
+    coverage["unsupported_code_files"] = profile["unsupported_code_files"]
+    summary = {"repo": canonical, "commit": commit, "checkout": str(root.resolve()), "profile": profile, "coverage": coverage, "public_context": _public_context(timeline_db, canonical), "hypotheses": [asdict(x) for x in findings], "generated_at": datetime.now(timezone.utc).isoformat()}
     (destination / "audit.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
     return destination / "audit.json"
 
@@ -684,7 +869,7 @@ def _automatic_claim(finding: dict, duplicate_review: dict) -> dict:
 
 class ResearchOrchestrator:
     """Run bounded reproduction stages and leave all external report submission to a human."""
-    def run(self, audit_file: Path, max_candidates: int = 3, container: bool = False) -> Path:
+    def run(self, audit_file: Path, max_candidates: int = 3, container: bool = False, timeline_db: Path | None = None) -> Path:
         audit_data = json.loads(audit_file.read_text(encoding="utf-8"))
         ranked = SemanticAnalysisAgent().run(audit_data.get("hypotheses", []))
         results = []
@@ -751,4 +936,10 @@ class ResearchOrchestrator:
         }
         output = audit_file.parent / "orchestration.json"
         output.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+        if timeline_db:
+            store = Store(timeline_db)
+            try:
+                store.save_research(audit_data, summary, output)
+            finally:
+                store.db.close()
         return output

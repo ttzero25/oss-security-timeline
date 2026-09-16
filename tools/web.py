@@ -18,7 +18,7 @@ sys.path.insert(0, str(ROOT))
 
 from oss_timeline.core import ApiError, HttpClient, Store, repo_name, synchronize  # noqa: E402
 from oss_timeline.fix import collect_reference_diffs  # noqa: E402
-from oss_timeline.research import audit, checkout  # noqa: E402
+from oss_timeline.research import ResearchOrchestrator, audit, checkout  # noqa: E402
 
 CSS = Path(__file__).with_name("web.css").read_text(encoding="utf-8")
 GRAPH_JS = Path(__file__).with_name("graph.js").read_text(encoding="utf-8")
@@ -27,6 +27,7 @@ AGENT_DESCRIPTIONS = {
     "ChangeAgent": "릴리스와 커밋 변경 기록 수집",
     "AdvisoryAgent": "GitHub·OSV 공개 보안 공지 수집",
     "CandidateAgent": "보안 관련 공개 변경의 검토 후보 선별",
+    "RepositoryProfilerAgent": "언어·패키지 파일·lockfile·외부 엔트리포인트 조사 범위 기록",
     "SourceScanAgent": "코드의 입력 경로와 위험 동작 연결 가설 탐색",
     "ResearchOrchestrator": "후보 우선순위화와 제한된 격리 재현 단계 조율",
     "PocValidatorAgent": "정상·공격 입력의 격리 PoC 결과 대조",
@@ -61,7 +62,11 @@ def research_index(root: Path) -> list[dict]:
                     contrasts += json.loads(evidence.read_text(encoding="utf-8")).get("mechanical_result") == "contrast_matched"
                 drafts += (folder / "GHSA_CANDIDATE.md").is_file() and (folder / "CVE_REQUEST_BRIEF.md").is_file()
             coverage = data.get("coverage", {})
-            items.append({"repo": data.get("repo", ""), "commit": data.get("commit", ""), "generated_at": data.get("generated_at"), "hypotheses": hypotheses, "poc_contrasts": contrasts, "draft_pairs": drafts, "coverage": coverage, "truncated": bool(coverage.get("truncated"))})
+            try:
+                orchestration = json.loads((path.parent / "orchestration.json").read_text(encoding="utf-8"))
+            except (OSError, ValueError, TypeError):
+                orchestration = {}
+            items.append({"repo": data.get("repo", ""), "commit": data.get("commit", ""), "generated_at": data.get("generated_at"), "hypotheses": hypotheses, "poc_contrasts": contrasts, "draft_pairs": drafts, "coverage": coverage, "profile": data.get("profile", {}), "orchestration": orchestration, "truncated": bool(coverage.get("truncated"))})
         except (OSError, ValueError, KeyError, TypeError):
             continue
     return sorted(items, key=lambda x: x.get("generated_at") or "", reverse=True)
@@ -169,6 +174,7 @@ def snapshot(path: Path, repo: str | None = None) -> tuple[dict, dict]:
             "advisories": db.execute("SELECT COUNT(*) FROM advisories").fetchone()[0],
             "events": db.execute("SELECT COUNT(*) FROM events").fetchone()[0],
             "change_candidates": db.execute("SELECT COUNT(*) FROM findings").fetchone()[0],
+            "research_events": db.execute("SELECT COUNT(*) FROM research_events").fetchone()[0],
         }
         return report, stats
     finally:
@@ -338,7 +344,10 @@ def home(report: dict, stats: dict, audits: list[dict], agents: list[dict]) -> s
     hypotheses = sum(len(x["hypotheses"]) for x in audits)
     contrasts = sum(x["poc_contrasts"] for x in audits)
     cards = "".join(f'<article class="agent-card"><span class="lane">{"공개 데이터" if x.get("lane") == "timeline" else "코드 조사"}</span><h3>{esc(x.get("name"))}</h3><p>{esc(AGENT_DESCRIPTIONS.get(x.get("name"), x.get("purpose")))}</p></article>' for x in agents)
-    recent = "".join(f'<li><span>{esc(str(x.get("at") or "")[:10])}</span><div><b>{esc(x.get("repo"))}</b><p>{safe_link(x.get("url"), x.get("title") or x.get("id"))}</p></div></li>' for x in report.get("timeline", [])[:5])
+    public_recent = [{**x, "display": x.get("title") or x.get("id")} for x in report.get("timeline", [])]
+    research_recent = [{**x, "url": None, "display": f'연구 · {x.get("kind")} · {x.get("status")}'} for x in report.get("research_timeline", [])]
+    recent_items = sorted(public_recent + research_recent, key=lambda item: item.get("at") or "", reverse=True)[:8]
+    recent = "".join(f'<li><span>{esc(str(x.get("at") or "")[:10])}</span><div><b>{esc(x.get("repo"))}</b><p>{safe_link(x.get("url"), x.get("display"))}</p></div></li>' for x in recent_items)
     body = f'''<section class="hero"><span class="eyebrow">OPEN SOURCE SECURITY INTELLIGENCE</span><h1>공개 변경부터 검증 가능한<br><em>보안 가설</em>까지.</h1><p>GitHub 저장소의 업데이트와 CVE·GHSA·OSV 공지를 시간순으로 모으고, 코드에서 발견한 후보를 별도의 검증 흐름으로 추적합니다.</p><a class="button" href="/lab">저장소 조사 시작 ↗</a></section>
 <section><div class="section-heading"><div><span class="eyebrow">PROJECT TOTALS</span><h2>누적 탐지</h2></div><p>현재 로컬 데이터 기준 · 샘플 값 없음</p></div><div class="metrics">{metric("추적 저장소", stats["repos"], "수집된 OSS")}{metric("고유 보안 공지", stats["advisories"], "CVE·GHSA 별칭 통합")}{metric("변경 이벤트", stats["events"], "릴리스·커밋")}{metric("코드 검토 후보", hypotheses, "취약점 확정 아님")}{metric("PoC 대조 성공", contrasts, "수동 검토 필요")}</div></section>
 <section class="split"><div class="panel"><div class="section-heading"><div><span class="eyebrow">ACTIVITY</span><h2>최근 타임라인</h2></div><a href="/summary">전체 보기 ↗</a></div>{'<ul class="activity">' + recent + '</ul>' if recent else empty("아직 수집된 기록이 없습니다. 실험실에서 저장소를 입력하세요.")}</div><div class="panel intro"><span class="eyebrow">HOW IT WORKS</span><h2>두 갈래의 조사 흐름</h2><p>공개 릴리스·커밋과 보안 공지를 수집해 시간축과 순위를 만듭니다. 이어서 소스 코드의 입력 경로와 위험 동작을 검토 가설로 찾습니다.</p><p>가설은 곧 제로데이가 아닙니다. 재현과 중복 공지 검토, 사람의 코드 확인을 거쳐 비공개 제보 초안으로 이어집니다.</p></div></section>
@@ -348,7 +357,7 @@ def home(report: dict, stats: dict, audits: list[dict], agents: list[dict]) -> s
 
 def lab(selected: str | None, report: dict | None, audits: list[dict], job: dict | None, error: str | None, comparisons: dict) -> str:
     value = esc("https://github.com/" + selected) if selected else ""
-    form = f'''<form method="post" action="/lab/start" class="repo-form"><label for="repo">GitHub 오픈소스 저장소</label><div class="input-row"><input id="repo" name="repo" type="url" value="{value}" placeholder="https://github.com/owner/repo" autocomplete="url" required><button class="button" type="submit">수집 · 코드 조사 시작 ↗</button></div><small>공개 GitHub 저장소만 허용합니다. PoC나 제보는 자동 실행하지 않습니다.</small></form>'''
+    form = f'''<form method="post" action="/lab/start" class="repo-form"><label for="repo">GitHub 오픈소스 저장소</label><div class="input-row"><input id="repo" name="repo" type="url" value="{value}" placeholder="https://github.com/owner/repo" autocomplete="url" required><button class="button" type="submit">수집 · 심층 조사 시작 ↗</button></div><small>공개 GitHub 저장소만 허용합니다. 지원되는 제한 PoC는 로컬에서 대조하지만 제보는 자동 제출하지 않습니다.</small></form>'''
     notice = f'<div class="notice error">{esc(error)}</div>' if error else ""
     running = bool(job and job["status"] == "running")
     if job:
@@ -365,13 +374,19 @@ def lab(selected: str | None, report: dict | None, audits: list[dict], job: dict
         rows = "".join(f'<tr><td>{esc(str(x.get("at") or "")[:10])}</td><td>{"수정" if x["kind"] == "advisory_update" else "게시"}</td><td>{esc(x.get("ghsa") or x.get("id"))}</td><td>{esc(x.get("cve") or "미등록")}</td><td>{esc(weakness_label(x))}</td><td>{safe_link(x.get("url"), x.get("title") or x.get("id"))}</td><td>{esc(x.get("severity") or "-")}</td></tr>' for x in advisories)
         audit_result = next((x for x in audits if x["repo"] == selected), None)
         hypotheses = audit_result["hypotheses"] if audit_result else []
+        orchestration = audit_result.get("orchestration", {}) if audit_result else {}
+        verdicts = {x["finding_id"]: x for x in orchestration.get("results", [])}
+        profile = audit_result.get("profile", {}) if audit_result else {}
         code_coverage = audit_result.get("coverage", {}) if audit_result else {}
         inspected = code_coverage.get("files_inspected")
         languages = ", ".join(code_coverage.get("languages", []))
         code_scope = f'조사 파일 {inspected}개 · 지원 언어 {languages}' if inspected is not None else "아직 코드 조사 기록이 없습니다"
         if code_coverage.get("truncated"):
             code_scope += " · 파일 상한으로 조사 잘림"
-        candidates = "".join(f'<tr><td>{esc(x.get("id"))}</td><td>{esc(x.get("kind"))}</td><td>{esc(x.get("path"))}:{esc(x.get("sink_line"))}</td><td>검토 후보</td></tr>' for x in hypotheses)
+        candidates = "".join(f'<tr><td>{esc(x.get("id"))}</td><td>{esc(x.get("kind"))}</td><td>{esc(x.get("path"))}:{esc(x.get("sink_line"))}</td><td>{esc(verdicts.get(x.get("id"), {}).get("status", "가설"))}</td></tr>' for x in hypotheses)
+        language_text = ", ".join(f"{name} {amount}" for name, amount in profile.get("languages", {}).items()) or "미확인"
+        profile_rows = "".join(f'<tr><td>{esc(item.get("kind"))}</td><td>{esc(item.get("path"))}:{esc(item.get("line"))}</td><td>{esc(item.get("code"))}</td></tr>' for item in profile.get("entrypoints", [])[:50])
+        research_rows = "".join(f'<tr><td>{esc(str(x.get("at") or "")[:19])}</td><td>{esc(x.get("kind"))}</td><td>{esc(x.get("finding_id") or "-")}</td><td>{esc(x.get("status"))}</td></tr>' for x in report.get("research_timeline", [])[:50])
         versions = "".join(f'<tr><td>{esc(x["advisory_id"])}</td><td>{esc(x["ecosystem"])} / {esc(x["name"])}</td><td>{esc(x["version_range"] or "미기재")}</td><td>{esc(x["patched"] or "미기재")}</td></tr>' for x in report.get("fix_versions", []))
         diff_cards = ""
         for comparison in comparisons.get("comparisons", []):
@@ -388,6 +403,7 @@ def lab(selected: str | None, report: dict | None, audits: list[dict], job: dict
         details = f'''<section><div class="section-heading"><div><span class="eyebrow">SELECTED REPOSITORY</span><h2>{esc(selected)}</h2></div><span class="pill">마지막 수집 {esc(str(repo_data.get("last_sync") or "")[:16])} UTC</span></div><div class="metrics compact">{metric("고유 공지", count, "저장소 연관 공지")}{metric("변경 기록", len(changes), "표시 범위 최대 300건")}{metric("코드 가설", len(hypotheses), "미검증 후보")}</div><p class="coverage">수집 범위: {esc(coverage)}<br>경고: {esc(warnings)}</p></section>
 <section><div class="section-heading"><div><span class="eyebrow">ADVISORY TRACKING</span><h2>보안 공지 추적</h2></div><p>CWE는 공지 원문에 명시된 값만 표시</p></div>{table(["시각", "기록", "식별자", "CVE", "취약점 유형 (CWE)", "공지", "심각도"], rows) if rows else empty("이 저장소의 보안 공지 기록이 아직 없습니다.")}</section>
 <section><div class="section-heading"><div><span class="eyebrow">ZERO-DAY RESEARCH</span><h2>미공개 취약점 조사</h2></div><p>후보 ≠ 발견 확정</p></div><div class="notice subdued">소스 스캔은 검토 가설만 만듭니다. 제로데이 판정에는 영향 재현, 중복 공지 확인, 사람의 검토가 필요합니다.</div><p class="coverage">{esc(code_scope)}. 미지원 언어·패턴의 후보 0건은 안전성의 증거가 아닙니다.</p>{table(["후보 ID", "분류", "코드 위치", "상태"], candidates) if candidates else empty("코드 가설이 없습니다. 조사 완료 여부와 스캔 범위를 확인하세요.")}</section>'''
+        details += f'''<section><div class="section-heading"><div><span class="eyebrow">REPOSITORY PROFILE</span><h2>코드·패키지 조사 범위</h2></div><p>커밋 {esc((audit_result or {}).get("commit", "")[:12])}</p></div><div class="metrics compact">{metric("확인 파일", profile.get("files_seen", 0), "vendor·생성 디렉터리 제외")}{metric("코드 파일", profile.get("code_files", 0), language_text)}{metric("의존성 항목", profile.get("dependency_count", 0), ", ".join(f"{k} {v}" for k, v in profile.get("dependency_ecosystems", {}).items()) or "지원 lockfile 기준")}</div><p class="coverage">매니페스트 {len(profile.get("manifests", []))}개 · lockfile {len(profile.get("lockfiles", []))}개 · 엔트리포인트 {len(profile.get("entrypoints", []))}개 · 미지원 코드 {profile.get("unsupported_code_files", 0)}개 · 프로필 잘림 {"예" if profile.get("truncated") else "아니오"} · 의존성 잘림 {"예" if profile.get("dependencies_truncated") else "아니오"}</p>{table(["입력 유형", "위치", "코드"], profile_rows) if profile_rows else empty("자동 식별된 엔트리포인트가 없습니다.")}</section><section><div class="section-heading"><div><span class="eyebrow">RESEARCH TIMELINE</span><h2>조사 상태 이력</h2></div><p>공개 공지와 별도 기록</p></div>{table(["시각", "단계", "후보", "상태"], research_rows) if research_rows else empty("아직 저장된 연구 이벤트가 없습니다.")}</section>'''
         details += f'''<section><div class="section-heading"><div><span class="eyebrow">BEFORE / AFTER</span><h2>Fix 전후 비교</h2></div><p>버전과 공지 참조 커밋 기준</p></div><div class="notice subdued">{esc(compare_note)}</div><h3>영향 버전 → 패치 버전</h3>{table(["공지", "패키지", "영향 범위", "패치 버전"], versions) if versions else empty("공지에 연결된 패키지 버전 정보가 없습니다.")}<h3 class="subheading">참조 커밋의 변경 줄</h3>{diff_cards or empty("저장된 공지 참조 커밋 비교가 없습니다. 새로 수집한 공지에 수정 커밋 링크가 없다면 코드 전후를 자동 연결하지 않습니다.")}</section>'''
     elif selected:
         details = "<section>" + empty("아직 이 저장소의 수집 기록이 없습니다. 조사 상태를 확인하세요.") + "</section>"
@@ -397,13 +413,16 @@ def lab(selected: str | None, report: dict | None, audits: list[dict], job: dict
 
 def summary(report: dict, audits: list[dict]) -> str:
     by_repo = {x["repo"]: x for x in audits}
+    latest_run = {}
+    for run in report.get("research_runs", []):
+        latest_run.setdefault(run["repo"], run)
     rank = {x["repo"]: x["advisories"] for x in report["ranking"]}
     ordered = sorted(report["repositories"], key=lambda x: (-rank.get(x["name"], 0), x["name"]))
-    rows = "".join(f'<tr><td><a href="/lab?repo={quote(x["name"])}">{esc(x["name"])}</a></td><td>{rank.get(x["name"], 0)}</td><td>{sum(p["repo"] == x["name"] for p in report["packages"])}</td><td>{len(by_repo.get(x["name"], {}).get("hypotheses", []))}</td><td>{esc(str(x.get("last_sync") or "")[:16])} UTC</td></tr>' for x in ordered)
+    rows = "".join(f'<tr><td><a href="/lab?repo={quote(x["name"])}">{esc(x["name"])}</a></td><td>{rank.get(x["name"], 0)}</td><td>{sum(p["repo"] == x["name"] for p in report["packages"])}</td><td>{len(by_repo.get(x["name"], {}).get("hypotheses", []))}</td><td>{esc(latest_run.get(x["name"], {}).get("status", "미실행"))}</td><td>{esc(str(x.get("last_sync") or "")[:16])} UTC</td></tr>' for x in ordered)
     packages = "".join(f'<tr><td>{esc(x["repo"])}</td><td>{esc(x["ecosystem"])}</td><td>{esc(x["name"])}</td><td>{x["advisories"]}</td></tr>' for x in report["packages"][:50])
     forecast = report.get("forecast", {})
     forecast_text = f'향후 {forecast.get("horizon_months")}개월 공개 공지 {forecast.get("expected")}건 예상' if forecast.get("status") == "estimated" else forecast.get("reason", "관측 기간과 공지 건수가 부족합니다.")
-    body = f'''<section class="page-head"><span class="eyebrow">PORTFOLIO</span><h1>정리</h1><p>OSS별 공개 공지와 패키지, 코드 검토 후보를 한눈에 비교합니다.</p></section><section><div class="section-heading"><div><span class="eyebrow">REPOSITORIES</span><h2>저장소별 결과</h2></div><p>공지 수는 저장소별 고유 건수</p></div>{table(["저장소", "공지", "패키지", "코드 가설", "마지막 수집"], rows) if rows else empty("아직 조사한 저장소가 없습니다. 실험실에서 첫 링크를 입력하세요.")}</section><section><div class="section-heading"><div><span class="eyebrow">PACKAGE RANKING</span><h2>패키지별 보안 공지</h2></div></div>{table(["저장소", "생태계", "패키지", "공지"], packages) if packages else empty("아직 패키지에 연결된 보안 공지가 없습니다.")}</section><section class="panel"><span class="eyebrow">FORECAST</span><h2>공개 공지 추정</h2><p>{esc(forecast_text)}</p><small>미공개 제로데이 발생 수는 공개 공지 이력만으로 예측할 수 없습니다.</small></section>'''
+    body = f'''<section class="page-head"><span class="eyebrow">PORTFOLIO</span><h1>정리</h1><p>OSS별 공개 공지와 패키지, 코드 검토 후보를 한눈에 비교합니다.</p></section><section><div class="section-heading"><div><span class="eyebrow">REPOSITORIES</span><h2>저장소별 결과</h2></div><p>공지 수는 저장소별 고유 건수</p></div>{table(["저장소", "공지", "패키지", "코드 가설", "심층 조사", "마지막 수집"], rows) if rows else empty("아직 조사한 저장소가 없습니다. 실험실에서 첫 링크를 입력하세요.")}</section><section><div class="section-heading"><div><span class="eyebrow">PACKAGE RANKING</span><h2>패키지별 보안 공지</h2></div></div>{table(["저장소", "생태계", "패키지", "공지"], packages) if packages else empty("아직 패키지에 연결된 보안 공지가 없습니다.")}</section><section class="panel"><span class="eyebrow">FORECAST</span><h2>공개 공지 추정</h2><p>{esc(forecast_text)}</p><small>미공개 제로데이 발생 수는 공개 공지 이력만으로 예측할 수 없습니다.</small></section>'''
     return page("정리", "summary", body)
 
 
@@ -438,10 +457,14 @@ def serve(port: int, db_path: Path, research_root: Path, registry_path: Path) ->
                 persist_jobs()
             collect_reference_diffs(client, repo, result.advisories, db_path.parent / "fix-comparisons")
             with lock:
-                jobs[repo]["step"] = "최신 커밋 복제 및 코드 가설 조사 중"
+                jobs[repo]["step"] = "최신 커밋 복제 및 저장소 프로파일링 중"
                 persist_jobs()
             root, _ = checkout(repo, research_root.parent / "checkouts")
-            audit(root, repo, research_root, timeline_db=db_path)
+            audit_file = audit(root, repo, research_root, timeline_db=db_path)
+            with lock:
+                jobs[repo]["step"] = "코드 가설 우선순위화 및 제한 PoC 대조 중"
+                persist_jobs()
+            ResearchOrchestrator().run(audit_file, max_candidates=3, timeline_db=db_path)
             with lock:
                 jobs[repo].update(status="complete", step="완료")
                 persist_jobs()
