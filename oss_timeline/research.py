@@ -309,6 +309,104 @@ def _workflow_hypotheses(filename: Path, root: Path, repo: str, commit: str) -> 
     return [_hypothesis(repo, commit, "workflow_injection", path, event, run, lines[event - 1], lines[run - 1], "github_actions_workflow", entry_kind="pull_request_target", trace=trace)]
 
 
+def _decorator_name(decorator: ast.AST) -> str:
+    return _qualified(decorator.func if isinstance(decorator, ast.Call) else decorator).lower()
+
+
+def _python_authorization_hypotheses(filename: Path, root: Path, repo: str, commit: str) -> list[Hypothesis]:
+    """Find narrow, evidence-backed privilege assignment and destructive IDOR candidates."""
+    try:
+        text = filename.read_text(encoding="utf-8")
+        tree = _python_parse(text)
+    except (OSError, UnicodeError, SyntaxError):
+        return []
+    lines = text.splitlines()
+    path = filename.relative_to(root).as_posix()
+    output = []
+    privileged_terms = ("admin", "staff", "permission", "privilege", "owner")
+    authentication_terms = ("login_required", "auth_required", "authenticated", "jwt_required", "require_auth")
+    privilege_fields = {"role", "roles", "is_admin", "is_staff", "permission", "permissions", "access_level", "privilege", "privileges"}
+    principal_terms = ("current_user", "request.user", "g.user", "owner_id", "user_id", "account_id", "tenant_id")
+    lookup_terms = (".get(", ".get_or_404(", ".filter(", ".filter_by(", ".find(", ".find_by_id(")
+    destructive_methods = {"delete", "destroy", "remove", "update"}
+
+    for function in (node for node in ast.walk(tree) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))):
+        decorators = [_decorator_name(item) for item in function.decorator_list]
+        route = any(name.rsplit(".", 1)[-1] in {"route", "get", "post", "put", "patch", "delete"} for name in decorators)
+        if not route:
+            continue
+        privileged_decorator = any(any(term in name for term in privileged_terms) for name in decorators)
+        authenticated = any(any(term in name for term in authentication_terms) for name in decorators)
+        function_text = ast.unparse(function).lower()
+        inline_authorization = any(principal in function_text for principal in principal_terms) and any(term in function_text for term in privileged_terms)
+
+        tainted: dict[str, tuple[int, str]] = {}
+        for argument in function.args.posonlyargs + function.args.args + function.args.kwonlyargs:
+            lowered = argument.arg.lower()
+            if lowered not in {"self", "cls", "request"} and (lowered == "id" or lowered.endswith(("_id", "_key", "_uuid"))):
+                tainted[argument.arg] = (function.lineno, lines[function.lineno - 1])
+
+        object_lookups: dict[str, tuple[tuple[int, str], int, str]] = {}
+        for node in sorted(ast.walk(function), key=lambda item: getattr(item, "lineno", 0)):
+            if isinstance(node, (ast.Assign, ast.AnnAssign)) and node.value is not None:
+                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                simple_targets = [target.id for target in targets if isinstance(target, ast.Name)]
+                origin = (node.value.lineno, lines[node.value.lineno - 1]) if _request_source(node.value) else next((tainted[name] for name in _name_refs(node.value) if name in tainted), None)
+                if origin:
+                    for name in simple_targets:
+                        tainted[name] = origin
+                value_text = ast.unparse(node.value).lower()
+                tainted_origin = next((tainted[name] for name in _name_refs(node.value) if name in tainted), None)
+                scoped = any(term in value_text for term in principal_terms)
+                if authenticated and tainted_origin and any(term in value_text for term in lookup_terms) and not scoped:
+                    for name in simple_targets:
+                        object_lookups[name] = (tainted_origin, node.lineno, lines[node.lineno - 1])
+
+                if not privileged_decorator and not inline_authorization and origin:
+                    for target in targets:
+                        field = target.attr.lower() if isinstance(target, ast.Attribute) else ""
+                        if field not in privilege_fields:
+                            continue
+                        trace = [
+                            {"role": "source", "path": path, "line": origin[0], "function": function.name, "code": origin[1].strip()[:240]},
+                            {"role": "privilege_write", "path": path, "line": node.lineno, "function": function.name, "code": lines[node.lineno - 1].strip()[:240]},
+                        ]
+                        output.append(_hypothesis(repo, commit, "privilege_assignment", path, origin[0], node.lineno, origin[1], lines[node.lineno - 1], function.name, entry_kind="http_route", trace=trace))
+
+                if authenticated and not inline_authorization and not privileged_decorator:
+                    for target in targets:
+                        affected = target.value.id if isinstance(target, ast.Attribute) and isinstance(target.value, ast.Name) else None
+                        if affected not in object_lookups:
+                            continue
+                        lookup_origin, lookup_line, lookup_code = object_lookups[affected]
+                        trace = [
+                            {"role": "source", "path": path, "line": lookup_origin[0], "function": function.name, "code": lookup_origin[1].strip()[:240]},
+                            {"role": "unscoped_lookup", "path": path, "line": lookup_line, "function": function.name, "code": lookup_code.strip()[:240]},
+                            {"role": "destructive_action", "path": path, "line": node.lineno, "function": function.name, "code": lines[node.lineno - 1].strip()[:240]},
+                        ]
+                        output.append(_hypothesis(repo, commit, "authorization_scope_candidate", path, lookup_origin[0], node.lineno, lookup_origin[1], lines[node.lineno - 1], function.name, entry_kind="http_route", trace=trace))
+
+            if not authenticated or inline_authorization or privileged_decorator or not isinstance(node, ast.Call):
+                continue
+            called = _qualified(node.func)
+            method = called.rsplit(".", 1)[-1].lower()
+            affected = None
+            if method in destructive_methods and isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name):
+                affected = node.func.value.id
+            elif method in destructive_methods and node.args and isinstance(node.args[0], ast.Name):
+                affected = node.args[0].id
+            if affected not in object_lookups:
+                continue
+            origin, lookup_line, lookup_code = object_lookups[affected]
+            trace = [
+                {"role": "source", "path": path, "line": origin[0], "function": function.name, "code": origin[1].strip()[:240]},
+                {"role": "unscoped_lookup", "path": path, "line": lookup_line, "function": function.name, "code": lookup_code.strip()[:240]},
+                {"role": "destructive_action", "path": path, "line": node.lineno, "function": function.name, "code": lines[node.lineno - 1].strip()[:240]},
+            ]
+            output.append(_hypothesis(repo, commit, "authorization_scope_candidate", path, origin[0], node.lineno, origin[1], lines[node.lineno - 1], function.name, entry_kind="http_route", trace=trace))
+    return output
+
+
 def _hypothesis(repo: str, commit: str, kind: str, path: str, source_line: int, sink_line: int, source_code: str, sink_code: str, function: str, *, source_path: str | None = None, sink_path: str | None = None, entry_kind: str = "modeled_external_input", trace: list[dict] | None = None) -> Hypothesis:
     source_path = source_path or path
     sink_path = sink_path or path
@@ -1243,6 +1341,7 @@ class SourceScanAgent:
                 output.extend(_python_hypotheses(filename, root, repo, commit))
                 output.extend(_python_interprocedural_hypotheses(filename, root, repo, commit))
                 output.extend(_python_toctou_hypotheses(filename, root, repo, commit))
+                output.extend(_python_authorization_hypotheses(filename, root, repo, commit))
             elif filename.suffix in C_EXTENSIONS:
                 output.extend(_c_hypotheses(filename, root, repo, commit))
             elif filename.suffix == ".go":
@@ -1262,7 +1361,7 @@ class SourceScanAgent:
 
 class SemanticAnalysisAgent:
     """Prioritize hypotheses and allow automatic reproduction only for bounded safe templates."""
-    SCORES = {"command_injection": 90, "workflow_injection": 88, "authentication_bypass": 85, "code_execution": 85, "template_injection": 80, "sql_injection": 75, "unsafe_deserialization": 70, "toctou_candidate": 68, "path_traversal": 65, "possible_ssrf": 60, "format_string": 55, "unsafe_copy": 50}
+    SCORES = {"command_injection": 90, "workflow_injection": 88, "authentication_bypass": 85, "code_execution": 85, "privilege_assignment": 84, "authorization_scope_candidate": 82, "template_injection": 80, "sql_injection": 75, "unsafe_deserialization": 70, "toctou_candidate": 68, "path_traversal": 65, "possible_ssrf": 60, "format_string": 55, "unsafe_copy": 50}
 
     def run(self, hypotheses: list[dict], profile: dict | None = None) -> list[dict]:
         changed = (profile or {}).get("recent_changes", {}).get("files", {})
@@ -1307,7 +1406,7 @@ class ReachabilityGateAgent:
 
 class EvidenceGateAgent:
     """Apply explicit evidence gates before a private draft can be generated."""
-    HIGH_IMPACT = {"command_injection", "workflow_injection", "authentication_bypass", "code_execution", "template_injection", "sql_injection", "unsafe_deserialization", "unsafe_copy", "format_string"}
+    HIGH_IMPACT = {"command_injection", "workflow_injection", "authentication_bypass", "privilege_assignment", "authorization_scope_candidate", "code_execution", "template_injection", "sql_injection", "unsafe_deserialization", "unsafe_copy", "format_string"}
 
     def run(self, audit_data: dict, finding: dict, reachability: dict, evidence: dict, duplicate_review: dict) -> dict:
         trace = finding.get("trace") or []
@@ -1956,10 +2055,12 @@ class DuplicateReviewAgent:
         "template_injection": {"template injection", "SSTI", "CWE-1336"},
         "path_traversal": {"path traversal", "directory traversal", "CWE-22"},
         "authentication_bypass": {"authentication bypass", "signature verification", "CWE-347"},
+        "privilege_assignment": {"privilege assignment", "role assignment", "privilege escalation", "CWE-266"},
+        "authorization_scope_candidate": {"authorization bypass", "IDOR", "BOLA", "user-controlled key", "CWE-639"},
         "toctou_candidate": {"TOCTOU", "race condition", "CWE-367"},
         "workflow_injection": {"GitHub Actions", "workflow injection", "pull_request_target", "CWE-829"},
     }
-    CWE = {"command_injection": "CWE-78", "workflow_injection": "CWE-829", "authentication_bypass": "CWE-347", "toctou_candidate": "CWE-367", "code_execution": "CWE-94", "unsafe_deserialization": "CWE-502", "possible_ssrf": "CWE-918", "sql_injection": "CWE-89", "template_injection": "CWE-1336", "path_traversal": "CWE-22"}
+    CWE = {"command_injection": "CWE-78", "workflow_injection": "CWE-829", "authentication_bypass": "CWE-347", "privilege_assignment": "CWE-266", "authorization_scope_candidate": "CWE-639", "toctou_candidate": "CWE-367", "code_execution": "CWE-94", "unsafe_deserialization": "CWE-502", "possible_ssrf": "CWE-918", "sql_injection": "CWE-89", "template_injection": "CWE-1336", "path_traversal": "CWE-22"}
 
     def run(self, audit_data: dict, finding: dict) -> dict:
         context = audit_data.get("public_context", {})
@@ -2008,8 +2109,8 @@ class DuplicateReviewAgent:
 
 
 def _automatic_claim(finding: dict, duplicate_review: dict, reachability: dict, evidence_gate: dict) -> dict:
-    cwe = {"command_injection": "CWE-78", "workflow_injection": "CWE-829", "authentication_bypass": "CWE-347", "toctou_candidate": "CWE-367", "code_execution": "CWE-94", "sql_injection": "CWE-89", "unsafe_deserialization": "CWE-502", "possible_ssrf": "CWE-918", "path_traversal": "CWE-22"}.get(finding["kind"], "CWE pending review")
-    label = {"command_injection": "Command injection", "workflow_injection": "Workflow trust-boundary injection", "authentication_bypass": "Authentication verification bypass", "toctou_candidate": "TOCTOU race candidate", "code_execution": "Code execution"}.get(finding["kind"], finding["kind"])
+    cwe = {"command_injection": "CWE-78", "workflow_injection": "CWE-829", "authentication_bypass": "CWE-347", "privilege_assignment": "CWE-266", "authorization_scope_candidate": "CWE-639", "toctou_candidate": "CWE-367", "code_execution": "CWE-94", "sql_injection": "CWE-89", "unsafe_deserialization": "CWE-502", "possible_ssrf": "CWE-918", "path_traversal": "CWE-22"}.get(finding["kind"], "CWE pending review")
+    label = {"command_injection": "Command injection", "workflow_injection": "Workflow trust-boundary injection", "authentication_bypass": "Authentication verification bypass", "privilege_assignment": "Untrusted privilege assignment", "authorization_scope_candidate": "Authorization scope bypass candidate", "toctou_candidate": "TOCTOU race candidate", "code_execution": "Code execution"}.get(finding["kind"], finding["kind"])
     claim = claim_template(finding)
     matches = ", ".join(item.get("id") or item.get("ghsa") or item.get("cve") or "unknown" for item in duplicate_review["matches"])
     duplicate_text = f"Potential matches require human comparison: {matches}" if matches else f'No keyword match among {duplicate_review["checked"]} collected advisories; broader manual search is still required.'

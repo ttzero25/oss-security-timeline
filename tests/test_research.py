@@ -206,6 +206,27 @@ class ResearchTests(unittest.TestCase):
         self.assertIn("github-actions", coverage["languages"])
         self.assertEqual(clean_findings, [])
 
+    def test_python_scan_detects_unscoped_destructive_object_access(self):
+        vulnerable = Path("benchmarks/cases/python_idor_delete")
+        scoped = Path("benchmarks/cases/python_scoped_delete")
+        findings, _ = SourceScanAgent().run(vulnerable, "fixture/idor", "4" * 40)
+        clean_findings, _ = SourceScanAgent().run(scoped, "fixture/scoped-delete", "5" * 40)
+        self.assertIn("authorization_scope_candidate", {item.kind for item in findings})
+        self.assertEqual(clean_findings, [])
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "update.py").write_text('''from flask_login import login_required\n\n@app.patch("/documents/<int:document_id>")\n@login_required\ndef rename(document_id):\n    document = Document.query.get_or_404(document_id)\n    document.title = "renamed"\n    db.session.commit()\n''', encoding="utf-8")
+            update_findings, _ = SourceScanAgent().run(root, "fixture/idor-update", "8" * 40)
+            self.assertIn("authorization_scope_candidate", {item.kind for item in update_findings})
+
+    def test_python_scan_detects_untrusted_privilege_assignment(self):
+        vulnerable = Path("benchmarks/cases/python_privilege_assignment")
+        admin_only = Path("benchmarks/cases/python_admin_role_assignment")
+        findings, _ = SourceScanAgent().run(vulnerable, "fixture/privilege", "6" * 40)
+        clean_findings, _ = SourceScanAgent().run(admin_only, "fixture/admin-role", "7" * 40)
+        self.assertIn("privilege_assignment", {item.kind for item in findings})
+        self.assertEqual(clean_findings, [])
+
     def test_repository_profile_records_packages_languages_and_entrypoints(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
