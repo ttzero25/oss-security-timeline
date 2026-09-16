@@ -26,6 +26,7 @@ JS_SINKS = [
     ("command_injection", re.compile(r"\b(?:child_process\.)?exec(?:Sync)?\s*\(")),
     ("code_execution", re.compile(r"\beval\s*\(")),
 ]
+GO_SOURCE = re.compile(r"\b(?:r\.(?:FormValue|PostFormValue)\s*\(|r\.URL\.Query\(\)\.Get\s*\(|r\.Header\.Get\s*\(|(?:c|ctx)\.(?:Query|Param|PostForm|FormValue)\s*\(|os\.Args\s*\[|flag\.Arg\s*\(|os\.Getenv\s*\()")
 C_EXTENSIONS = {".c", ".h", ".cc", ".cpp", ".cxx", ".hpp"}
 C_RETURN_SOURCE = re.compile(r"\b(?:getenv|getopt|getopt_long)\s*\(|\bargv\s*\[")
 C_BUFFER_SOURCE = re.compile(r"\b(?:recv|recvfrom|read|fgets|gets|scanf|sscanf)\s*\(")
@@ -811,6 +812,197 @@ def _javascript_multihop_hypotheses(files: list[Path], root: Path, repo: str, co
     return output
 
 
+def _go_function_blocks(lines: list[str]) -> list[dict]:
+    pattern = re.compile(r"^\s*func\s+(?:\([^)]*\)\s*)?([A-Za-z_]\w*)\s*\(([^)]*)\)[^{]*\{")
+    output = []
+    for index, line in enumerate(lines):
+        match = pattern.search(line)
+        if not match:
+            continue
+        depth, end = 0, index
+        for cursor in range(index, len(lines)):
+            code = re.sub(r'`[^`]*`|"(?:\\.|[^"\\])*"', "", lines[cursor].split("//", 1)[0])
+            depth += code.count("{") - code.count("}")
+            end = cursor
+            if depth <= 0:
+                break
+        parameters = []
+        pending = []
+        for raw in match.group(2).split(","):
+            parts = raw.strip().split()
+            if len(parts) == 1 and parts[0]:
+                pending.append(parts[0])
+            elif len(parts) >= 2:
+                parameters.extend(pending)
+                pending = []
+                parameters.append(parts[0])
+        output.append({"name": match.group(1), "parameters": parameters, "start": index, "end": end})
+    return output
+
+
+def _go_refs(value: str) -> set[str]:
+    without_literals = re.sub(r'`[^`]*`|"(?:\\.|[^"\\])*"', "", value)
+    return set(re.findall(r"\b[A-Za-z_]\w*\b", without_literals))
+
+
+def _go_arguments(value: str) -> list[str]:
+    arguments, current, depth, quote, escaped = [], [], 0, None, False
+    for char in value:
+        if quote:
+            current.append(char)
+            if escaped:
+                escaped = False
+            elif char == "\\" and quote == '"':
+                escaped = True
+            elif char == quote:
+                quote = None
+        elif char in {'"', '`'}:
+            quote = char
+            current.append(char)
+        elif char in "([{":
+            depth += 1
+            current.append(char)
+        elif char in ")]}":
+            if depth == 0 and char == ")":
+                break
+            depth = max(0, depth - 1)
+            current.append(char)
+        elif char == "," and depth == 0:
+            arguments.append("".join(current).strip())
+            current = []
+        else:
+            current.append(char)
+    if current:
+        arguments.append("".join(current).strip())
+    return arguments
+
+
+def _go_multihop_hypotheses(files: list[Path], root: Path, repo: str, commit: str, max_depth: int = 4) -> list[Hypothesis]:
+    """Trace bounded local Go calls from modeled HTTP/CLI inputs to selected sinks."""
+    module_path = ""
+    try:
+        module_match = re.search(r"(?m)^\s*module\s+(\S+)", (root / "go.mod").read_text(encoding="utf-8"))
+        module_path = module_match.group(1) if module_match else ""
+    except (OSError, UnicodeError):
+        pass
+    functions: dict[str, dict] = {}
+    file_records = []
+    for filename in files:
+        try:
+            lines = filename.read_text(encoding="utf-8").splitlines()
+        except (OSError, UnicodeError):
+            continue
+        directory = filename.relative_to(root).parent.as_posix()
+        if directory == ".":
+            directory = ""
+        imports: dict[str, str] = {}
+        for line in lines:
+            match = re.match(r'^\s*(?:([A-Za-z_]\w*)\s+)?"([^"]+)"\s*$', line)
+            if not match:
+                match = re.search(r'\bimport\s+(?:([A-Za-z_]\w*)\s+)?"([^"]+)"', line)
+            if not match:
+                continue
+            imported = match.group(2)
+            if module_path and (imported == module_path or imported.startswith(module_path + "/")):
+                local = imported[len(module_path):].lstrip("/")
+                imports[match.group(1) or imported.rsplit("/", 1)[-1]] = local
+        path = filename.relative_to(root).as_posix()
+        record = {"path": path, "lines": lines, "directory": directory, "imports": imports}
+        file_records.append(record)
+        for block in _go_function_blocks(lines):
+            functions[f'{directory}:{block["name"]}'] = {**record, **block}
+
+    def resolve(info: dict, name: str) -> str | None:
+        if "." in name:
+            head, tail = name.split(".", 1)
+            target = info["imports"].get(head)
+            return f"{target}:{tail}" if target is not None else None
+        local = f'{info["directory"]}:{name}'
+        return local if local in functions else None
+
+    def sink_for(line: str) -> tuple[str, str] | None:
+        shell = re.search(r"\bexec\.Command(?:Context)?\s*\((.*)", line)
+        if shell:
+            arguments = _go_arguments(shell.group(1))
+            offset = 1 if "CommandContext" in shell.group(0) else 0
+            if len(arguments) >= offset + 3 and arguments[offset].strip('`"') in {"sh", "/bin/sh", "bash", "/bin/bash"} and arguments[offset + 1].strip('`"') in {"-c", "-lc"}:
+                return "command_injection", arguments[offset + 2]
+        request = re.search(r"\bhttp\.(?:Get|Post|Head)\s*\((.*)", line)
+        if request:
+            arguments = _go_arguments(request.group(1))
+            if arguments:
+                return "possible_ssrf", arguments[0]
+        new_request = re.search(r"\bhttp\.NewRequest(?:WithContext)?\s*\((.*)", line)
+        if new_request:
+            arguments = _go_arguments(new_request.group(1))
+            url_index = 2 if "WithContext" in new_request.group(0) else 1
+            if len(arguments) > url_index:
+                return "possible_ssrf", arguments[url_index]
+        return None
+
+    def analyze(info: dict) -> tuple[dict[str, tuple[str, int, str]], list[dict], list[dict]]:
+        origins = {name: (name, info["start"] + 1, info["lines"][info["start"]]) for name in info["parameters"]}
+        sinks, calls = [], []
+        for offset in range(info["start"], info["end"] + 1):
+            line, number = info["lines"][offset], offset + 1
+            assignment = re.search(r"\b([A-Za-z_]\w*)\s*(?::=|=)\s*(.+)", line)
+            if assignment:
+                value = assignment.group(2)
+                if GO_SOURCE.search(value):
+                    origins[assignment.group(1)] = ("__external__", number, line)
+                else:
+                    inherited = next((origins[name] for name in _go_refs(value) if name in origins), None)
+                    if inherited:
+                        origins[assignment.group(1)] = inherited
+            sink = sink_for(line)
+            if sink:
+                kind, argument = sink
+                origin = ("__external__", number, line) if GO_SOURCE.search(argument) else next((origins[name] for name in _go_refs(argument) if name in origins), None)
+                if origin:
+                    sinks.append({"parameter": origin[0], "source_line": origin[1], "source_code": origin[2], "kind": kind, "sink_line": number, "sink_code": line, "sink_path": info["path"], "trace": [{"role": "sink", "path": info["path"], "line": number, "function": info["name"], "code": line.strip()[:240]}]})
+            for call in re.finditer(r"\b([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)?)\s*\((.*)", line):
+                callee = resolve(info, call.group(1))
+                if callee and callee != f'{info["directory"]}:{info["name"]}':
+                    calls.append({"callee": callee, "arguments": _go_arguments(call.group(2)), "line": number, "code": line})
+        return origins, sinks, calls
+
+    analyzed = {key: analyze(info) for key, info in functions.items()}
+    summaries = {key: list(result[1]) for key, result in analyzed.items()}
+    for _ in range(max_depth):
+        changed = False
+        for key, info in functions.items():
+            origins, _, calls = analyzed[key]
+            for call in calls:
+                if call["callee"] not in functions:
+                    continue
+                parameters = functions[call["callee"]]["parameters"]
+                supplied = {parameters[index]: value for index, value in enumerate(call["arguments"]) if index < len(parameters)}
+                for downstream in summaries[call["callee"]]:
+                    argument = supplied.get(downstream["parameter"])
+                    if argument is None:
+                        continue
+                    origin = ("__external__", call["line"], call["code"]) if GO_SOURCE.search(argument) else next((origins[name] for name in _go_refs(argument) if name in origins), None)
+                    if not origin:
+                        continue
+                    propagated = {**downstream, "parameter": origin[0], "source_line": origin[1], "source_code": origin[2], "trace": [{"role": "call", "path": info["path"], "line": call["line"], "function": info["name"], "callee": call["callee"], "code": call["code"].strip()[:240]}, *downstream["trace"]]}
+                    identity = (propagated["parameter"], propagated["kind"], propagated["sink_path"], propagated["sink_line"], tuple(step.get("callee") for step in propagated["trace"]))
+                    existing = {(item["parameter"], item["kind"], item["sink_path"], item["sink_line"], tuple(step.get("callee") for step in item["trace"])) for item in summaries[key]}
+                    if identity not in existing:
+                        summaries[key].append(propagated)
+                        changed = True
+        if not changed:
+            break
+
+    output = []
+    for key, info in functions.items():
+        for finding in summaries[key]:
+            if finding["parameter"] != "__external__":
+                continue
+            trace = [{"role": "source", "path": info["path"], "line": finding["source_line"], "function": info["name"], "code": finding["source_code"].strip()[:240]}, *finding["trace"]]
+            output.append(_hypothesis(repo, commit, finding["kind"], info["path"], finding["source_line"], finding["sink_line"], finding["source_code"], finding["sink_code"], info["name"], source_path=info["path"], sink_path=finding["sink_path"], entry_kind="modeled_request", trace=trace))
+    return output
+
+
 def _c_source_variable(line: str) -> str | None:
     assignment = re.search(r"\b([A-Za-z_]\w*)\s*=\s*[^;]*(?:getenv|getopt|getopt_long)\s*\(|\b([A-Za-z_]\w*)\s*=\s*argv\s*\[", line)
     if assignment:
@@ -866,6 +1058,7 @@ class SourceScanAgent:
         output: list[Hypothesis] = []
         python_files: list[Path] = []
         javascript_files: list[Path] = []
+        go_files: list[Path] = []
         inspected = 0
         truncated = False
         for filename in root.rglob("*"):
@@ -874,7 +1067,7 @@ class SourceScanAgent:
                     continue
             except OSError:
                 continue
-            if filename.suffix not in {".py", ".js", ".mjs", ".cjs", ".ts", ".mts", ".cts", *C_EXTENSIONS}:
+            if filename.suffix not in {".py", ".js", ".mjs", ".cjs", ".ts", ".mts", ".cts", ".go", *C_EXTENSIONS}:
                 continue
             inspected += 1
             if inspected > max_files:
@@ -886,13 +1079,17 @@ class SourceScanAgent:
                 output.extend(_python_interprocedural_hypotheses(filename, root, repo, commit))
             elif filename.suffix in C_EXTENSIONS:
                 output.extend(_c_hypotheses(filename, root, repo, commit))
+            elif filename.suffix == ".go":
+                go_files.append(filename)
             else:
                 javascript_files.append(filename)
         multihop_limit = min(len(python_files), 5_000)
         javascript_limit = min(len(javascript_files), 5_000)
+        go_limit = min(len(go_files), 5_000)
         output.extend(_python_multihop_hypotheses(python_files[:multihop_limit], root, repo, commit))
         output.extend(_javascript_multihop_hypotheses(javascript_files[:javascript_limit], root, repo, commit))
-        return sorted({x.id: x for x in output}.values(), key=lambda x: (x.path, x.sink_line)), {"files_inspected": min(inspected, max_files), "truncated": truncated, "languages": ["python", "javascript/typescript", "c/c++"], "python_multihop_files": multihop_limit, "python_multihop_truncated": len(python_files) > multihop_limit, "javascript_multihop_files": javascript_limit, "javascript_multihop_truncated": len(javascript_files) > javascript_limit}
+        output.extend(_go_multihop_hypotheses(go_files[:go_limit], root, repo, commit))
+        return sorted({x.id: x for x in output}.values(), key=lambda x: (x.path, x.sink_line)), {"files_inspected": min(inspected, max_files), "truncated": truncated, "languages": ["python", "javascript/typescript", "go", "c/c++"], "python_multihop_files": multihop_limit, "python_multihop_truncated": len(python_files) > multihop_limit, "javascript_multihop_files": javascript_limit, "javascript_multihop_truncated": len(javascript_files) > javascript_limit, "go_multihop_files": go_limit, "go_multihop_truncated": len(go_files) > go_limit}
 
 
 class SemanticAnalysisAgent:

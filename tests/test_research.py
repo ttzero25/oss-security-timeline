@@ -105,6 +105,28 @@ class ResearchTests(unittest.TestCase):
             findings, _ = SourceScanAgent().run(root, "fixture/javascript-scope", "2" * 40)
             self.assertEqual(findings, [])
 
+    def test_go_scan_traces_local_package_function(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "go.mod").write_text("module example.test/demo\n\ngo 1.22\n", encoding="utf-8")
+            (root / "main.go").write_text('''package main\nimport (\n    "net/http"\n    "example.test/demo/worker"\n)\nfunc handler(w http.ResponseWriter, r *http.Request) {\n    command := r.FormValue("command")\n    worker.Execute(command)\n}\n''', encoding="utf-8")
+            worker = root / "worker"
+            worker.mkdir()
+            (worker / "worker.go").write_text('''package worker\nimport "os/exec"\nfunc Execute(value string) {\n    exec.Command("sh", "-c", value).Run()\n}\n''', encoding="utf-8")
+            findings, coverage = SourceScanAgent().run(root, "fixture/go-multihop", "3" * 40)
+            linked = [item for item in findings if item.function == "handler" and item.sink_path == "worker/worker.go"]
+            self.assertEqual(len(linked), 1)
+            self.assertEqual(linked[0].kind, "command_injection")
+            self.assertEqual([step["role"] for step in linked[0].trace], ["source", "call", "sink"])
+            self.assertEqual(coverage["go_multihop_files"], 2)
+
+    def test_go_scan_does_not_treat_argv_exec_as_shell(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "main.go").write_text('''package main\nimport ("net/http"; "os/exec")\nfunc handler(w http.ResponseWriter, r *http.Request) {\n    name := r.FormValue("name")\n    exec.Command("printf", "%s", name).Run()\n}\n''', encoding="utf-8")
+            findings, _ = SourceScanAgent().run(root, "fixture/go-safe", "4" * 40)
+            self.assertEqual(findings, [])
+
     def test_repository_profile_records_packages_languages_and_entrypoints(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

@@ -14,4 +14,4 @@ The default result is `data/benchmarks/latest.json` and appears in the web summa
 python3 -m oss_timeline benchmark --min-recall 1 --max-false-positive-cases 1
 ```
 
-The bundled cases are synthetic and include fixed-command allowlists, imported Python class-method paths, JavaScript cross-module calls, and JavaScript function-scope isolation. They measure deterministic regressions, not real-world zero-day performance. Historical vulnerable/fixed commits and dynamic build/PoC metrics must be added before making broader accuracy claims.
+The bundled cases are synthetic and include fixed-command allowlists, imported Python class-method paths, JavaScript cross-module calls and scope isolation, plus Go local-package calls and shell-free argv execution. They measure deterministic regressions, not real-world zero-day performance. Historical vulnerable/fixed commits and dynamic build/PoC metrics must be added before making broader accuracy claims.
