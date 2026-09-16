@@ -51,6 +51,8 @@ section{margin-bottom:50px}
 .input-row input:focus{outline:2px solid var(--accent)}
 .input-row input:-webkit-autofill,.input-row input:-webkit-autofill:hover,.input-row input:-webkit-autofill:focus{-webkit-text-fill-color:#f1faf5;-webkit-box-shadow:0 0 0 1000px #0c1714 inset;caret-color:#f1faf5}
 .repo-form small{display:block;margin-top:12px}
+.repo-form .check-option{display:flex;align-items:center;gap:8px;margin:13px 0 0;font-weight:500;color:#aabbb2}.repo-form .check-option input{width:16px;height:16px;accent-color:var(--accent)}
+.research-actions{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin:16px 0}.research-actions small{color:#87988f;max-width:720px}.research-actions button:disabled{opacity:.5;cursor:not-allowed}
 .capability-list{display:flex;flex-wrap:wrap;gap:7px;margin-top:15px}.capability-list span{padding:6px 9px;border:1px solid #30424d;border-radius:100px;background:#121b22;color:#aebfc9;font-size:11px}
 .notice{display:flex;justify-content:space-between;gap:20px;padding:14px 17px;background:#151f27;border:1px solid #30414d;border-radius:10px;margin-top:16px;color:#d6e0e6;font-size:13px}
 .notice.error{background:#3b241e;border-color:#a55b47}

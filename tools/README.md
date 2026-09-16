@@ -21,3 +21,5 @@ The lab's before/after section compares advisory-linked vulnerable and patched p
 Web job status is saved under `data/web-jobs.json`. On restart, a job that was still running is marked interrupted rather than silently disappearing; it is not automatically resumed.
 
 At startup the web process reconciles completed legacy `audit.json` plus `orchestration.json` pairs into `research_runs` without executing target code again. An audit without an orchestration result remains labeled as static-only rather than being shown as never run.
+
+The Lab start form can opt into a complete sharded source scan. After an audit has hypotheses, `이월 후보 다음 묶음 PoC 검증` runs the same resumable orchestrator used by `research-replay`: previous candidate verdicts are preserved, the next supported candidates are selected, bounded PoC contrasts run locally, and evidence-gated GHSA/CVE drafts appear in Reports. A candidate that fails reachability, reproduction, impact, freshness, or duplicate checks remains a hypothesis with the blocking reason and does not receive a draft.

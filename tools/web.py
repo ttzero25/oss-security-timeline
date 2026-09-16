@@ -437,7 +437,7 @@ def home(report: dict, stats: dict, audits: list[dict], agents: list[dict]) -> s
 def lab(selected: str | None, report: dict | None, audits: list[dict], job: dict | None, error: str | None, comparisons: dict, fix_year: str = "", fix_month: str = "") -> str:
     value = esc("https://github.com/" + selected) if selected else ""
     capabilities = "".join(f"<span>{esc(label)}</span>" for label in ("명령·코드 실행", "SSRF · 네트워크 스텁", "SQL · DB 스텁", "경로 조작 · scratch", "pickle · stdout 전용", "템플릿 sink · 범위 표시", "C/C++ · ASan/UBSan"))
-    form = f'''<form method="post" action="/lab/start" class="repo-form"><label for="repo">GitHub 오픈소스 저장소</label><div class="input-row"><input id="repo" name="repo" type="url" value="{value}" placeholder="https://github.com/owner/repo" autocomplete="url" required><button class="button" type="submit">수집 · 심층 조사 시작 ↗</button></div><small>공개 GitHub 저장소만 허용합니다. 지원되는 제한 PoC는 로컬에서 대조하지만 제보는 자동 제출하지 않습니다.</small><div class="capability-list" aria-label="제한 자동 재현 범위">{capabilities}</div></form>'''
+    form = f'''<form method="post" action="/lab/start" class="repo-form"><label for="repo">GitHub 오픈소스 저장소</label><div class="input-row"><input id="repo" name="repo" type="url" value="{value}" placeholder="https://github.com/owner/repo" autocomplete="url" required><button class="button" type="submit">수집 · 심층 조사 시작 ↗</button></div><label class="check-option"><input type="checkbox" name="complete_scan" value="1"> 지원 코드 전체를 20,000파일 샤드로 끝까지 조사</label><small>공개 GitHub 저장소만 허용합니다. 지원되는 제한 PoC는 로컬에서 대조하지만 제보는 자동 제출하지 않습니다.</small><div class="capability-list" aria-label="제한 자동 재현 범위">{capabilities}</div></form>'''
     notice = f'<div class="notice error">{esc(error)}</div>' if error else ""
     running = bool(job and job["status"] == "running")
     if job:
@@ -481,6 +481,9 @@ def lab(selected: str | None, report: dict | None, audits: list[dict], job: dict
             code_scope += " · 최근 변경 파일 우선"
         if code_coverage.get("truncated"):
             code_scope += " · 파일 상한으로 조사 잘림"
+        replay_controls = ""
+        if audit_result and hypotheses:
+            replay_controls = f'''<form method="post" action="/lab/replay" class="research-actions"><input type="hidden" name="repo" value="{esc(selected)}"><button class="button" type="submit"{" disabled" if running else ""}>이월 후보 다음 묶음 PoC 검증 ↗</button><small>이미 시도한 후보는 보존하고 건너뜁니다. 근거 게이트를 통과하면 GHSA/CVE 비공개 초안이 리포트 탭에 생성됩니다.</small></form>'''
         candidate_rows = []
         for finding in hypotheses:
             verdict = verdicts.get(finding.get("id"), {})
@@ -538,7 +541,7 @@ def lab(selected: str | None, report: dict | None, audits: list[dict], job: dict
             compare_note += " 참조 커밋은 처음 5개만 수집했습니다."
         details = f'''<section><div class="section-heading"><div><span class="eyebrow">SELECTED REPOSITORY</span><h2>{esc(selected)}</h2></div><span class="pill">마지막 수집 {esc(str(repo_data.get("last_sync") or "")[:16])} UTC</span></div><div class="metrics compact">{metric("고유 공지", count, "저장소 연관 공지")}{metric("변경 기록", len(changes), "표시 범위 최대 300건")}{metric("코드 가설", len(hypotheses), "미검증 후보")}{metric("심층 조사", deep_status, "DB 실행 기록 기준")}</div><p class="coverage">수집 범위: {esc(coverage)}<br>경고: {esc(warnings)}</p></section>
 <section><div class="section-heading"><div><span class="eyebrow">ADVISORY TRACKING</span><h2>보안 공지 추적</h2></div><p>CWE는 공지 원문에 명시된 값만 표시</p></div>{table(["시각", "기록", "식별자", "CVE", "취약점 유형 (CWE)", "공지", "심각도"], rows) if rows else empty("이 저장소의 보안 공지 기록이 아직 없습니다.")}</section>
-<section><div class="section-heading"><div><span class="eyebrow">ZERO-DAY RESEARCH</span><h2>미공개 취약점 조사</h2></div><p>후보 ≠ 발견 확정</p></div><div class="notice subdued">{esc(research_explanation)}</div><p class="coverage">{esc(code_scope)}. 미지원 언어·패턴의 후보 0건은 안전성의 증거가 아닙니다.</p>{table(["후보 ID", "분류", "입력→호출→위험 동작", "상태", "근거 게이트"], candidates) if candidates else empty("코드 가설이 없습니다. 조사 완료 여부와 스캔 범위를 확인하세요.")}<h3 class="subheading">동적 PoC·실행 환경</h3>{verification_table}</section>'''
+<section><div class="section-heading"><div><span class="eyebrow">ZERO-DAY RESEARCH</span><h2>미공개 취약점 조사</h2></div><p>후보 ≠ 발견 확정</p></div><div class="notice subdued">{esc(research_explanation)}</div><p class="coverage">{esc(code_scope)}. 미지원 언어·패턴의 후보 0건은 안전성의 증거가 아닙니다.</p>{replay_controls}{table(["후보 ID", "분류", "입력→호출→위험 동작", "상태", "근거 게이트"], candidates) if candidates else empty("코드 가설이 없습니다. 조사 완료 여부와 스캔 범위를 확인하세요.")}<h3 class="subheading">동적 PoC·실행 환경</h3>{verification_table}</section>'''
         details += f'''<section><div class="section-heading"><div><span class="eyebrow">REPOSITORY PROFILE</span><h2>코드·패키지 조사 범위</h2></div><p>커밋 {esc((audit_result or {}).get("commit", "")[:12])}</p></div><div class="metrics compact">{metric("확인 파일", profile.get("files_seen", 0), "vendor·생성 디렉터리 제외")}{metric("코드 파일", profile.get("code_files", 0), language_text)}{metric("의존성 항목", profile.get("dependency_count", 0), ", ".join(f"{k} {v}" for k, v in profile.get("dependency_ecosystems", {}).items()) or "지원 lockfile 기준")}</div><p class="coverage">유형 {esc(profile.get("project_kind", "미확인"))} · 프레임워크 {esc(framework_text)} · 최근 변경 분석 커밋 {recent_changes.get("commits_considered", 0)}개/파일 {len(recent_changes.get("files", {}))}개<br>매니페스트 {len(profile.get("manifests", []))}개 · lockfile {len(profile.get("lockfiles", []))}개 · 엔트리포인트 {len(profile.get("entrypoints", []))}개 · 미지원 코드 {profile.get("unsupported_code_files", 0)}개 · 프로필 잘림 {"예" if profile.get("truncated") else "아니오"} · 의존성 잘림 {"예" if profile.get("dependencies_truncated") else "아니오"}</p>{table(["입력 유형", "위치", "코드"], profile_rows) if profile_rows else empty("자동 식별된 엔트리포인트가 없습니다.")}</section><section><div class="section-heading"><div><span class="eyebrow">RESEARCH TIMELINE</span><h2>조사 상태 이력</h2></div><p>공개 공지와 별도 기록</p></div>{table(["시각", "단계", "후보", "상태"], research_rows) if research_rows else empty("아직 저장된 연구 이벤트가 없습니다.")}</section>'''
         details += f'''<section><div class="section-heading"><div><span class="eyebrow">BEFORE / AFTER</span><h2>Fix 전후 비교</h2></div><p>버전과 공지 참조 커밋 기준</p></div><div class="notice subdued">{esc(compare_note)}</div><h3>영향 버전 → 패치 버전</h3>{table(["공지", "패키지", "영향 범위", "패치 버전"], versions) if versions else empty("공지에 연결된 패키지 버전 정보가 없습니다.")}<div class="section-heading subheading"><h3>참조 커밋의 변경 줄</h3><p>{len(filtered_comparisons)}/{len(dated_comparisons)}개 비교</p></div>{fix_filter}{diff_cards or empty("선택한 기간에 저장된 fix 비교가 없습니다.")}</section>'''
     elif selected:
@@ -624,7 +627,9 @@ def serve(port: int, db_path: Path, research_root: Path, registry_path: Path) ->
                 jobs[repo]["step"] = "최신 커밋 복제 및 저장소 프로파일링 중"
                 persist_jobs()
             root, _ = checkout(repo, research_root.parent / "checkouts")
-            audit_file = audit(root, repo, research_root, timeline_db=db_path)
+            with lock:
+                complete_scan = bool(jobs[repo].get("complete_scan"))
+            audit_file = audit(root, repo, research_root, timeline_db=db_path, complete_scan=complete_scan)
             with lock:
                 jobs[repo]["step"] = "코드 가설 우선순위화 및 제한 PoC 대조 중"
                 persist_jobs()
@@ -647,6 +652,34 @@ def serve(port: int, db_path: Path, research_root: Path, registry_path: Path) ->
                 timer.daemon = True
                 timer.start()
 
+    def latest_audit(repo: str) -> Path:
+        matches = []
+        for audit_path in research_root.rglob("audit.json") if research_root.is_dir() else []:
+            try:
+                data = json.loads(audit_path.read_text(encoding="utf-8"))
+                if repo_name(data.get("repo", "")) == repo:
+                    matches.append((str(data.get("generated_at") or ""), audit_path))
+            except (OSError, ValueError, TypeError, json.JSONDecodeError):
+                continue
+        if not matches:
+            raise ValueError("이어 실행할 감사 결과가 없습니다")
+        return max(matches, key=lambda item: item[0])[1]
+
+    def run_replay_job(repo: str) -> None:
+        try:
+            with lock:
+                jobs[repo]["step"] = "이월 후보 우선순위화 및 제한 PoC 대조 중"
+                persist_jobs()
+            audit_file = latest_audit(repo)
+            ResearchOrchestrator().run(audit_file, max_candidates=3, timeline_db=db_path, resume=True)
+            with lock:
+                jobs[repo].update(status="complete", step="이월 후보 검증 완료", error="")
+                persist_jobs()
+        except (ValueError, RuntimeError, OSError, KeyError) as exc:
+            with lock:
+                jobs[repo].update(status="failed", step="실패", error=str(exc)[-400:])
+                persist_jobs()
+
     with lock:
         queued = [repo for repo, job in jobs.items() if job.get("status") == "queued"]
         for repo in queued:
@@ -654,7 +687,8 @@ def serve(port: int, db_path: Path, research_root: Path, registry_path: Path) ->
         if queued:
             persist_jobs()
     for repo in queued:
-        threading.Thread(target=run_job, args=(repo,), daemon=True).start()
+        target = run_replay_job if jobs[repo].get("action") == "replay" else run_job
+        threading.Thread(target=target, args=(repo,), daemon=True).start()
 
     class Handler(BaseHTTPRequestHandler):
         def respond(self, body: str, status: int = 200, content_type: str = "text/html; charset=utf-8", location: str | None = None) -> None:
@@ -739,7 +773,8 @@ def serve(port: int, db_path: Path, research_root: Path, registry_path: Path) ->
             self.respond(page("찾을 수 없음", "", empty("페이지가 없습니다.")), status=404)
 
         def do_POST(self) -> None:
-            if urlparse(self.path).path != "/lab/start":
+            action_path = urlparse(self.path).path
+            if action_path not in {"/lab/start", "/lab/replay"}:
                 self.respond("허용되지 않은 요청", status=405)
                 return
             origin = self.headers.get("Origin")
@@ -753,10 +788,12 @@ def serve(port: int, db_path: Path, research_root: Path, registry_path: Path) ->
                 length = int(self.headers.get("Content-Length", "0"))
                 if not 1 <= length <= 1024:
                     raise ValueError("입력 길이는 1~1024바이트여야 합니다")
-                value = parse_qs(self.rfile.read(length).decode("utf-8"), keep_blank_values=True).get("repo", [""])[0]
-                if not value.startswith("https://github.com/"):
+                fields = parse_qs(self.rfile.read(length).decode("utf-8"), keep_blank_values=True)
+                value = fields.get("repo", [""])[0]
+                if action_path == "/lab/start" and not value.startswith("https://github.com/"):
                     raise ValueError("HTTPS GitHub 저장소 링크를 입력하세요")
                 repo = repo_name(value)
+                complete_scan = action_path == "/lab/start" and fields.get("complete_scan", [""])[0] == "1"
             except (ValueError, UnicodeError) as exc:
                 self.respond(page("입력 오류", "lab", empty(str(exc))), status=400)
                 return
@@ -764,9 +801,10 @@ def serve(port: int, db_path: Path, research_root: Path, registry_path: Path) ->
                 if any(x["status"] == "running" for x in jobs.values()):
                     self.respond(page("진행 중", "lab", empty("다른 조사가 진행 중입니다. 완료 후 다시 시도하세요.")), status=409)
                     return
-                jobs[repo] = {"repo": repo, "status": "running", "step": "조사 대기 중", "started_at": datetime.now(timezone.utc).isoformat(), "attempts": 1, "max_attempts": 3, "resume_on_restart": True}
+                jobs[repo] = {"repo": repo, "status": "running", "step": "이월 후보 검증 대기 중" if action_path == "/lab/replay" else "조사 대기 중", "started_at": datetime.now(timezone.utc).isoformat(), "attempts": 1, "max_attempts": 3, "resume_on_restart": True, "action": "replay" if action_path == "/lab/replay" else "research", "complete_scan": complete_scan}
                 persist_jobs()
-            threading.Thread(target=run_job, args=(repo,), daemon=True).start()
+            target = run_replay_job if action_path == "/lab/replay" else run_job
+            threading.Thread(target=target, args=(repo,), daemon=True).start()
             self.respond("", status=303, location="/lab?repo=" + quote(repo))
 
     server = ThreadingHTTPServer(("127.0.0.1", port), Handler)

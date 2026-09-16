@@ -60,6 +60,7 @@ class DashboardTests(unittest.TestCase):
             self.assertIn("CONFIRMED", rendered)
             self.assertIn("FastAPI", rendered)
             self.assertIn("최근 변경 분석 커밋 4개", rendered)
+            self.assertIn('action="/lab/replay"', rendered)
             store.db.close()
 
     def test_lab_shows_poc_scope_and_dependency_preflight(self):
@@ -80,6 +81,7 @@ class DashboardTests(unittest.TestCase):
         self.assertIn('class="notice job-status running"', rendered)
         self.assertIn("SSRF · 네트워크 스텁", rendered)
         self.assertIn("경로 조작 · scratch", rendered)
+        self.assertIn('name="complete_scan"', rendered)
 
     def test_restart_queues_running_job_for_resume(self):
         with tempfile.TemporaryDirectory() as temp:
