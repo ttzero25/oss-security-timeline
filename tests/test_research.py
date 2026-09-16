@@ -81,6 +81,18 @@ class ResearchTests(unittest.TestCase):
             self.assertEqual(linked[0].kind, "unsafe_deserialization")
             self.assertEqual(linked[0].entry_kind, "modeled_public_api")
 
+    def test_python_scan_tracks_public_input_through_augmented_sql(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "store.py").write_text('''class Store:\n    def list(self, limit=None):\n        query = "SELECT * FROM records"\n        if limit:\n            query += f" LIMIT {limit}"\n        self.db.execute(query)\n''', encoding="utf-8")
+            (root / "safe_store.py").write_text('''class Store:\n    def find(self, data):\n        values = [item[0] for item in data]\n        placeholders = ",".join("?" * len(values))\n        self.db.execute(f"SELECT * FROM records WHERE id IN ({placeholders})", values)\n''', encoding="utf-8")
+            findings, _ = SourceScanAgent().run(root, "fixture/public-sql", "9" * 40)
+            linked = [item for item in findings if item.function == "list"]
+            self.assertEqual(len(linked), 1)
+            self.assertEqual(linked[0].kind, "sql_injection")
+            self.assertEqual(linked[0].entry_kind, "modeled_public_api")
+            self.assertFalse(any(item.path == "safe_store.py" for item in findings))
+
     def test_python_scan_treats_immutable_literal_allowlist_as_sanitizer(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -155,6 +167,14 @@ class ResearchTests(unittest.TestCase):
             self.assertEqual(len(linked), 1)
             self.assertEqual(linked[0].kind, "command_injection")
             self.assertEqual(linked[0].entry_kind, "modeled_request")
+
+    def test_go_scan_models_echo_query_param(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "handler.go").write_text('''package main\nimport "net/http"\nfunc Get(c Context) {\n    target := c.QueryParam("url")\n    http.Get(target)\n}\n''', encoding="utf-8")
+            findings, _ = SourceScanAgent().run(root, "fixture/go-echo", "a" * 40)
+            self.assertEqual(len(findings), 1)
+            self.assertEqual(findings[0].kind, "possible_ssrf")
 
     def test_repository_profile_records_packages_languages_and_entrypoints(self):
         with tempfile.TemporaryDirectory() as temp:

@@ -30,8 +30,8 @@ JS_SINKS = [
     ("sql_injection", re.compile(r"\b[A-Za-z_$][\w$]*\.(?:query|execute)\s*\(")),
     ("path_traversal", re.compile(r"\bfs\.(?:readFile|readFileSync|writeFile|writeFileSync|createReadStream|createWriteStream)\s*\(")),
 ]
-GO_SOURCE = re.compile(r"\b(?:r\.(?:FormValue|PostFormValue)\s*\(|r\.URL\.Query\(\)\.Get\s*\(|r\.Header\.Get\s*\(|(?:c|ctx)\.(?:Query|Param|PostForm|FormValue)\s*\(|os\.Args\s*\[|flag\.Arg\s*\(|os\.Getenv\s*\()")
-PUBLIC_INPUT_NAMES = {"args", "body", "command", "content", "data", "filename", "input", "params", "path", "payload", "query", "url"}
+GO_SOURCE = re.compile(r"\b(?:r\.(?:FormValue|PostFormValue)\s*\(|r\.URL\.Query\(\)\.Get\s*\(|r\.Header\.Get\s*\(|(?:c|ctx)\.(?:Query|QueryParam|Param|PostForm|FormValue)\s*\(|os\.Args\s*\[|flag\.Arg\s*\(|os\.Getenv\s*\()")
+PUBLIC_INPUT_NAMES = {"args", "body", "command", "content", "data", "filename", "input", "limit", "params", "path", "payload", "query", "url"}
 C_EXTENSIONS = {".c", ".h", ".cc", ".cpp", ".cxx", ".hpp"}
 C_RETURN_SOURCE = re.compile(r"\b(?:getenv|getopt|getopt_long)\s*\(|\bargv\s*\[")
 C_BUFFER_SOURCE = re.compile(r"\b(?:recv|recvfrom|read|fgets|gets|scanf|sscanf)\s*\(")
@@ -188,6 +188,17 @@ def _safe_allowlist_lookup(node: ast.AST, tables: set[str]) -> bool:
     if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name):
         return node.func.value.id in tables and node.func.attr == "get"
     return False
+
+
+def _safe_sql_placeholder_expression(node: ast.AST) -> bool:
+    """Recognize a bounded DB-API placeholder builder such as ','.join('?' * len(values))."""
+    if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute) or node.func.attr != "join" or len(node.args) != 1:
+        return False
+    value = node.args[0]
+    if not isinstance(value, ast.BinOp) or not isinstance(value.op, ast.Mult):
+        return False
+    candidates = (value.left, value.right)
+    return any(isinstance(item, ast.Constant) and item.value == "?" for item in candidates) and any(isinstance(item, ast.Call) and _qualified(item.func) == "len" for item in candidates)
 
 
 def _name_refs(node: ast.AST) -> set[str]:
@@ -566,6 +577,8 @@ def _python_multihop_hypotheses(files: list[Path], root: Path, repo: str, commit
             if isinstance(child, (ast.Assign, ast.AnnAssign)) and child.value is not None:
                 if _safe_allowlist_lookup(child.value, info["allowlists"]):
                     continue
+                if _safe_sql_placeholder_expression(child.value):
+                    continue
                 origin = next((origins[name] for name in _name_refs(child.value) if name in origins), None)
                 if origin:
                     targets = child.targets if isinstance(child, ast.Assign) else [child.target]
@@ -573,6 +586,10 @@ def _python_multihop_hypotheses(files: list[Path], root: Path, repo: str, commit
                         for sub in ast.walk(target):
                             if isinstance(sub, ast.Name):
                                 origins[sub.id] = origin
+            elif isinstance(child, ast.AugAssign):
+                origin = next((origins[name] for name in _name_refs(child.value) if name in origins), None)
+                if origin and isinstance(child.target, ast.Name):
+                    origins[child.target.id] = origin
         return parameters, origins
 
     summaries: dict[str, list[dict]] = {key: [] for key in functions}
@@ -636,8 +653,15 @@ def _python_multihop_hypotheses(files: list[Path], root: Path, repo: str, commit
                     external[parameter] = (node.lineno, info["lines"][node.lineno - 1], "http_route")
         elif not node.name.startswith("_"):
             for parameter in parameters:
-                if parameter.lower() in PUBLIC_INPUT_NAMES:
+                lowered = parameter.lower()
+                if lowered in PUBLIC_INPUT_NAMES or lowered.endswith(("_filter", "_payload", "_url", "_path")):
                     external[parameter] = (node.lineno, info["lines"][node.lineno - 1], "modeled_public_api")
+        for downstream in summaries[key]:
+            source = external.get(downstream["parameter"])
+            if not source:
+                continue
+            trace = [{"role": "source", "path": info["path"], "line": source[0], "function": node.name, "code": source[1].strip()[:240]}, *downstream["trace"]]
+            output.append(_hypothesis(repo, commit, downstream["kind"], info["path"], source[0], downstream["sink_line"], source[1], downstream["sink_code"], node.name, source_path=info["path"], sink_path=downstream["sink_path"], entry_kind=source[2], trace=trace))
         for call in (child for child in ast.walk(node) if isinstance(child, ast.Call)):
             callee = resolve_callee(info, call)
             if not callee or callee not in summaries:

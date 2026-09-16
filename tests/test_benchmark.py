@@ -31,7 +31,7 @@ class BenchmarkTests(unittest.TestCase):
 
     def test_default_corpus_passes_after_known_semantic_fixes(self):
         result = run_benchmark(Path("benchmarks/corpus.json"))
-        self.assertEqual(result["metrics"]["total_cases"], 27)
+        self.assertEqual(result["metrics"]["total_cases"], 31)
         self.assertEqual(result["metrics"]["false_negative_cases"], 0)
         self.assertEqual(result["metrics"]["false_positive_cases"], 0)
         allowlist = next(case for case in result["cases"] if case["id"] == "python-allowlist-command")
@@ -40,8 +40,8 @@ class BenchmarkTests(unittest.TestCase):
         method_dispatch = next(case for case in result["cases"] if case["id"] == "python-method-multihop")
         self.assertTrue(method_dispatch["passed"])
         self.assertIn("command_injection", method_dispatch["found_kinds"])
-        self.assertEqual(result["metrics"]["by_origin"]["historical"], {"cases": 6, "passed": 6, "pass_rate": 1.0})
-        self.assertEqual(result["metrics"]["historical_pairs_passed"], 3)
+        self.assertEqual(result["metrics"]["by_origin"]["historical"], {"cases": 10, "passed": 10, "pass_rate": 1.0})
+        self.assertEqual(result["metrics"]["historical_pairs_passed"], 5)
 
     def test_cli_threshold_can_fail_a_regression_gate(self):
         with tempfile.TemporaryDirectory() as temp:
