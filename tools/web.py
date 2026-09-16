@@ -68,7 +68,7 @@ def research_index(root: Path) -> list[dict]:
                 orchestration = json.loads((path.parent / "orchestration.json").read_text(encoding="utf-8"))
             except (OSError, ValueError, TypeError):
                 orchestration = {}
-            items.append({"repo": data.get("repo", ""), "commit": data.get("commit", ""), "generated_at": data.get("generated_at"), "hypotheses": hypotheses, "poc_contrasts": contrasts, "draft_pairs": drafts, "coverage": coverage, "profile": data.get("profile", {}), "orchestration": orchestration, "truncated": bool(coverage.get("truncated"))})
+            items.append({"repo": data.get("repo", ""), "commit": data.get("commit", ""), "generated_at": data.get("generated_at"), "hypotheses": hypotheses, "poc_contrasts": contrasts, "draft_pairs": drafts, "coverage": coverage, "scan_cache": data.get("scan_cache", {}), "profile": data.get("profile", {}), "orchestration": orchestration, "truncated": bool(coverage.get("truncated"))})
         except (OSError, ValueError, KeyError, TypeError):
             continue
     return sorted(items, key=lambda x: x.get("generated_at") or "", reverse=True)
@@ -434,8 +434,13 @@ def lab(selected: str | None, report: dict | None, audits: list[dict], job: dict
         profile = audit_result.get("profile", {}) if audit_result else {}
         code_coverage = audit_result.get("coverage", {}) if audit_result else {}
         inspected = code_coverage.get("files_inspected")
+        eligible = code_coverage.get("eligible_files")
         languages = ", ".join(code_coverage.get("languages", []))
-        code_scope = f'조사 파일 {inspected}개 · 지원 언어 {languages}' if inspected is not None else "아직 코드 조사 기록이 없습니다"
+        code_scope = f'조사 파일 {inspected}/{eligible if eligible is not None else inspected}개 · 지원 언어 {languages}' if inspected is not None else "아직 코드 조사 기록이 없습니다"
+        if audit_result and audit_result.get("scan_cache", {}).get("reused"):
+            code_scope += " · 동일 커밋 스캔 캐시 재사용"
+        elif inspected is not None:
+            code_scope += " · 최근 변경 파일 우선"
         if code_coverage.get("truncated"):
             code_scope += " · 파일 상한으로 조사 잘림"
         candidate_rows = []

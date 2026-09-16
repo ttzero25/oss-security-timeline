@@ -154,6 +154,36 @@ class ResearchTests(unittest.TestCase):
             self.assertEqual(profile["project_kind"], "service")
             self.assertTrue({item["kind"] for item in profile["entrypoints"]} >= {"http", "cli"})
 
+    def test_source_scan_prioritizes_recent_paths_before_file_limit(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "a_safe.py").write_text('def safe():\n    return "ok"\n', encoding="utf-8")
+            (root / "z_changed.py").write_text('import os\ndef run(request):\n    command = request.args["command"]\n    return os.system(command)\n', encoding="utf-8")
+            findings, coverage = SourceScanAgent().run(root, "fixture/priority", "6" * 40, max_files=1, priority_paths={"z_changed.py"})
+            self.assertEqual({item.path for item in findings}, {"z_changed.py"})
+            self.assertEqual(coverage["eligible_files"], 2)
+            self.assertEqual(coverage["priority_files_scanned"], 1)
+            self.assertEqual(coverage["files_skipped_by_limit"], 1)
+
+    def test_audit_reuses_only_clean_same_commit_scan(self):
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)
+            repo = self._checkout(folder)
+            first = audit(repo, "fixture/cache", folder / "research", max_files=50)
+            original = (repo / "synthetic_app.py").read_text()
+            self.assertFalse(json.loads(first.read_text())["scan_cache"]["reused"])
+            second = audit(repo, "fixture/cache", folder / "research", max_files=50)
+            self.assertTrue(json.loads(second.read_text())["scan_cache"]["reused"])
+            (repo / "synthetic_app.py").write_text((repo / "synthetic_app.py").read_text() + "\n# dirty\n", encoding="utf-8")
+            third = audit(repo, "fixture/cache", folder / "research", max_files=50)
+            self.assertFalse(json.loads(third.read_text())["scan_cache"]["reused"])
+            self.assertFalse(json.loads(third.read_text())["scan_cache"]["cacheable"])
+            (repo / "synthetic_app.py").write_text(original, encoding="utf-8")
+            fourth = audit(repo, "fixture/cache", folder / "research", max_files=50)
+            self.assertFalse(json.loads(fourth.read_text())["scan_cache"]["reused"])
+            fifth = audit(repo, "fixture/cache", folder / "research", max_files=50)
+            self.assertTrue(json.loads(fifth.read_text())["scan_cache"]["reused"])
+
     def test_poc_controls_and_disclosure_gate(self):
         with tempfile.TemporaryDirectory() as temp:
             folder = Path(temp)
