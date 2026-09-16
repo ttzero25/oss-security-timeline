@@ -213,14 +213,15 @@ def run_upstream_benchmark(manifest_file: Path, output_file: Path | None = None,
                 commit = actual
             paths = {item.strip() for item in str(provenance["source_path"]).split(";") if item.strip()}
             focus_function = str(provenance.get("focus_function") or "")
+            focus_sink_contains = str(provenance.get("focus_sink_contains") or "")
             findings, coverage = SourceScanAgent().run(root, repository, commit, max_files=max_files, priority_paths=paths)
-            relevant = [item for item in findings if {item.path, item.source_path, item.sink_path} & paths and (not focus_function or item.function == focus_function)]
+            relevant = [item for item in findings if {item.path, item.source_path, item.sink_path} & paths and (not focus_function or item.function == focus_function) and (not focus_sink_contains or focus_sink_contains in item.sink_code)]
             found = {item.kind for item in relevant}
             expected = pair_expected[str(case["pair_id"])]
             passed = expected <= found if case["expectation"] == "vulnerable" else False
             results.append({
                 "id": case["id"], "pair_id": case["pair_id"], "expectation": case["expectation"], "repository": repository,
-                "requested_ref": sha_match.group(0), "commit": commit, "source_paths": sorted(paths), "focus_function": focus_function or None, "expected_kinds": sorted(expected), "found_kinds": sorted(found),
+                "requested_ref": sha_match.group(0), "commit": commit, "source_paths": sorted(paths), "focus_function": focus_function or None, "focus_sink_contains": focus_sink_contains or None, "expected_kinds": sorted(expected), "found_kinds": sorted(found),
                 "relevant_findings": len(relevant), "finding_signatures": [{"kind": item.kind, "function": item.function, "source_path": item.source_path, "sink_path": item.sink_path} for item in relevant], "passed": passed, "coverage": coverage,
             })
     pairs = {}

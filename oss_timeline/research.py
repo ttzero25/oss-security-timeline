@@ -35,7 +35,7 @@ JS_SINKS = [
 GO_SOURCE = re.compile(r"\b(?:r\.(?:FormValue|PostFormValue)\s*\(|r\.URL\.Query\(\)\.Get\s*\(|r\.Header\.Get\s*\(|(?:c|ctx)\.(?:Query|QueryParam|Param|PostForm|FormValue)\s*\(|os\.Args\s*\[|flag\.Arg\s*\(|os\.Getenv\s*\()")
 PUBLIC_INPUT_NAMES = {"args", "body", "command", "content", "data", "filename", "input", "limit", "params", "path", "payload", "query", "url"}
 C_EXTENSIONS = {".c", ".h", ".cc", ".cpp", ".cxx", ".hpp"}
-C_RETURN_SOURCE = re.compile(r"\b(?:getenv|getopt|getopt_long)\s*\(|\bargv\s*\[")
+C_RETURN_SOURCE = re.compile(r"\b(?:getenv|getopt|getopt_long)\s*\(|\bargv\s*\[|=\s*[A-Za-z_]\w*(?:receive|recv|read)[A-Za-z_]*\s*\(", re.I)
 C_BUFFER_SOURCE = re.compile(r"\b(?:recv|recvfrom|read|fgets|gets|scanf|sscanf)\s*\(")
 C_SINKS = [
     ("command_injection", re.compile(r"\b(?:system|popen|execl|execlp|execv|execvp)\s*\(([^;]*)")),
@@ -1365,6 +1365,9 @@ def _c_source_variable(line: str) -> str | None:
     assignment = re.search(r"\b([A-Za-z_]\w*)\s*=\s*[^;]*(?:getenv|getopt|getopt_long)\s*\(|\b([A-Za-z_]\w*)\s*=\s*argv\s*\[", line)
     if assignment:
         return assignment.group(1) or assignment.group(2)
+    received = re.search(r"\b([A-Za-z_]\w*)\s*=\s*[A-Za-z_]\w*(?:receive|recv|read)[A-Za-z_]*\s*\(", line, re.I)
+    if received:
+        return received.group(1)
     call = re.search(r"\b(?:recv|recvfrom|read)\s*\(\s*[^,]+,\s*([A-Za-z_]\w*)", line)
     if call:
         return call.group(1)
@@ -1459,6 +1462,14 @@ def _c_memory_hypotheses(lines: list[str], path: str, repo: str, commit: str) ->
                         {"role": "write", "path": path, "line": number, "function": function, "code": line.strip()[:240]},
                     ]
                     output.append(_hypothesis(repo, commit, "buffer_overflow", path, source_line, number, source_code, line, function, entry_kind="modeled_external_input", trace=trace))
+        propagation = re.search(r"\b[A-Za-z_]\w*\s*\((.*)", line)
+        if propagation:
+            references = _go_refs(re.sub(r"\bsizeof\s*\([^)]*\)", "", propagation.group(1)))
+            if any(item[2] in references for item in recent):
+                excluded = {"char", "const", "int", "long", "null", "short", "signed", "size_t", "sizeof", "strlen", "struct", "unsigned", "void"}
+                for candidate in references:
+                    if candidate.lower() not in excluded and not any(item[2] == candidate for item in recent):
+                        recent.append((number, line, candidate))
         if function != "c_scope_unknown" and brace_depth <= 0:
             function = "c_scope_unknown"
             buffers = {}
@@ -1500,10 +1511,18 @@ def _c_hypotheses(filename: Path, root: Path, repo: str, commit: str) -> list[Hy
             source = next((item for item in reversed(recent) if re.search(r"\b" + re.escape(item[2]) + r"\b", arguments)), None)
             if source:
                 between = "\n".join(lines[source[0] : number - 1])
-                length_guard = re.search(r"\bstrlen\s*\(\s*" + re.escape(source[2]) + r"\s*\)\s*(?:>=|>)\s*sizeof\s*\(", between)
+                length_guard = re.search(r"\bstrlen\s*\(\s*(?:\([^)]*\)\s*)?" + re.escape(source[2]) + r"\s*\)[^;\n]{0,160}(?:>=|>)\s*sizeof\s*\(", between)
                 if kind == "unsafe_copy" and length_guard and re.search(r"\b(?:return|goto)\b", between[length_guard.start() :]):
                     continue
                 output.append(_hypothesis(repo, commit, kind, path, source[0], number, source[1], line, function))
+        propagation = re.search(r"\b[A-Za-z_]\w*\s*\((.*)", line)
+        if propagation:
+            references = _go_refs(re.sub(r"\bsizeof\s*\([^)]*\)", "", propagation.group(1)))
+            if any(item[2] in references for item in recent):
+                excluded = {"char", "const", "int", "long", "null", "short", "signed", "size_t", "sizeof", "strlen", "struct", "unsigned", "void"}
+                for candidate in references:
+                    if candidate.lower() not in excluded and not any(item[2] == candidate for item in recent):
+                        recent.append((number, line, candidate))
         if function != "c_scope_unknown" and brace_depth <= 0:
             function = "c_scope_unknown"
             recent = []

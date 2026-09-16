@@ -31,7 +31,7 @@ class BenchmarkTests(unittest.TestCase):
 
     def test_default_corpus_passes_after_known_semantic_fixes(self):
         result = run_benchmark(Path("benchmarks/corpus.json"))
-        self.assertEqual(result["metrics"]["total_cases"], 55)
+        self.assertEqual(result["metrics"]["total_cases"], 57)
         self.assertEqual(result["metrics"]["false_negative_cases"], 0)
         self.assertEqual(result["metrics"]["false_positive_cases"], 0)
         allowlist = next(case for case in result["cases"] if case["id"] == "python-allowlist-command")
@@ -40,8 +40,8 @@ class BenchmarkTests(unittest.TestCase):
         method_dispatch = next(case for case in result["cases"] if case["id"] == "python-method-multihop")
         self.assertTrue(method_dispatch["passed"])
         self.assertIn("command_injection", method_dispatch["found_kinds"])
-        self.assertEqual(result["metrics"]["by_origin"]["historical"], {"cases": 10, "passed": 10, "pass_rate": 1.0})
-        self.assertEqual(result["metrics"]["historical_pairs_passed"], 5)
+        self.assertEqual(result["metrics"]["by_origin"]["historical"], {"cases": 12, "passed": 12, "pass_rate": 1.0})
+        self.assertEqual(result["metrics"]["historical_pairs_passed"], 6)
 
     def test_cli_threshold_can_fail_a_regression_gate(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -77,12 +77,12 @@ class BenchmarkTests(unittest.TestCase):
             vulnerable.mkdir()
             fixed.mkdir()
             unsafe = 'import subprocess\ndef run(request):\n    value = request.args["value"]\n    return subprocess.run(value, shell=True)\n'
-            safe = 'import subprocess\ndef run(request):\n    value = request.args["value"]\n    return subprocess.run(["printf", "%s", value])\n'
+            safe = 'import subprocess\ndef run(request):\n    value = request.args["value"]\n    return subprocess.run(["printf", "%s", value])\n\ndef unrelated(request):\n    other = request.args["other"]\n    return subprocess.run(other, shell=True)\n'
             (vulnerable / "app.py").write_text(unsafe, encoding="utf-8")
             (fixed / "app.py").write_text(safe, encoding="utf-8")
             (fixed / "unrelated.py").write_text(unsafe, encoding="utf-8")
             vuln_sha, fixed_sha = "a" * 40, "b" * 40
-            common = {"advisory": "GHSA-5w57-2ccq-8w95", "repository": "owner/repo", "source_path": "app.py", "snapshot_type": "focused_excerpt"}
+            common = {"advisory": "GHSA-5w57-2ccq-8w95", "repository": "owner/repo", "source_path": "app.py", "focus_sink_contains": "subprocess.run(value", "snapshot_type": "focused_excerpt"}
             cases = [
                 {"id": "real-vulnerable", "path": "vulnerable", "origin": "historical", "pair_id": "CVE-2099-1", "expectation": "vulnerable", "expected_kinds": ["command_injection"], "provenance": {**common, "ref": vuln_sha, "url": f"https://github.com/owner/repo/blob/{vuln_sha}/app.py"}},
                 {"id": "real-fixed", "path": "fixed", "origin": "historical", "pair_id": "CVE-2099-1", "expectation": "clean", "expected_kinds": [], "provenance": {**common, "ref": fixed_sha, "url": f"https://github.com/owner/repo/blob/{fixed_sha}/app.py"}},
@@ -94,6 +94,7 @@ class BenchmarkTests(unittest.TestCase):
             self.assertEqual(result["metrics"]["pairs_passed"], 1)
             self.assertEqual(result["metrics"]["pair_pass_rate"], 1.0)
             self.assertEqual(result["cases"][1]["found_kinds"], [])
+            self.assertEqual(result["cases"][1]["focus_sink_contains"], "subprocess.run(value")
             self.assertTrue(output.is_file())
 
 
