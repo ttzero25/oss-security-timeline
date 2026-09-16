@@ -458,7 +458,7 @@ def lab(selected: str | None, report: dict | None, audits: list[dict], job: dict
         hypotheses = audit_result["hypotheses"] if audit_result else []
         orchestration = audit_result.get("orchestration", {}) if audit_result else {}
         verdicts = {x["finding_id"]: x for x in orchestration.get("results", [])}
-        attempted = int(orchestration.get("attempted_candidates", 0) or 0)
+        attempted = int(orchestration.get("attempted_candidates_total", orchestration.get("attempted_candidates", 0)) or 0)
         unavailable = int(orchestration.get("automation_unavailable_candidates", 0) or 0)
         deferred = int(orchestration.get("deferred_supported_candidates", 0) or 0)
         if not hypotheses:

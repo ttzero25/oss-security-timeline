@@ -171,7 +171,7 @@ def main(argv: list[str] | None = None) -> int:
                     response["orchestration"] = json.loads(orchestration.read_text(encoding="utf-8"))
                 print(json.dumps(response, ensure_ascii=False))
             elif args.command == "research-replay":
-                orchestration = ResearchOrchestrator().run(args.audit_file, args.max_candidates, container=args.container, timeline_db=args.db)
+                orchestration = ResearchOrchestrator().run(args.audit_file, args.max_candidates, container=args.container, timeline_db=args.db, resume=True)
                 result = json.loads(orchestration.read_text(encoding="utf-8"))
                 print(json.dumps({"audit_file": str(args.audit_file), "orchestration_file": str(orchestration), "orchestration": result}, ensure_ascii=False))
             elif args.command == "poc-init":

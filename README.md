@@ -89,7 +89,7 @@ python3 -m oss_timeline research-run https://github.com/owner/repo --max-candida
 python3 -m oss_timeline research-run https://github.com/owner/repo --complete-scan --max-files 20000 --max-candidates 3
 ```
 
-이미 생성된 `audit.json`을 재수집·재스캔 없이 최신 후보 선별 및 제한 PoC 엔진으로 다시 검증할 수도 있습니다.
+이미 생성된 `audit.json`을 재수집·재스캔 없이 최신 후보 선별 및 제한 PoC 엔진으로 다시 검증할 수도 있습니다. `research-replay`는 같은 orchestration 결과에서 이미 시도한 후보를 보존하고 건너뛰어 이월된 지원 후보의 다음 묶음으로 진행합니다.
 
 ```sh
 python3 -m oss_timeline research-replay data/research/OWNER_REPO/COMMIT/audit.json --max-candidates 3

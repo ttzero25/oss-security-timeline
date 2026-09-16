@@ -3041,12 +3041,24 @@ def _automatic_claim(finding: dict, duplicate_review: dict, reachability: dict, 
 
 class ResearchOrchestrator:
     """Run bounded reproduction stages and leave all external report submission to a human."""
-    def run(self, audit_file: Path, max_candidates: int = 3, container: bool = False, timeline_db: Path | None = None) -> Path:
+    def run(self, audit_file: Path, max_candidates: int = 3, container: bool = False, timeline_db: Path | None = None, resume: bool = False) -> Path:
         audit_data = json.loads(audit_file.read_text(encoding="utf-8"))
         ranked = SemanticAnalysisAgent().run(audit_data.get("hypotheses", []), audit_data.get("profile", {}))
-        selected = _balanced_reproduction_candidates(ranked, max_candidates)
+        output = audit_file.parent / "orchestration.json"
+        previous_results = []
+        attempted_before: set[str] = set()
+        if resume and output.is_file():
+            try:
+                previous = json.loads(output.read_text(encoding="utf-8"))
+                if previous.get("repo") == audit_data.get("repo") and previous.get("commit") == audit_data.get("commit"):
+                    previous_results = [item for item in previous.get("results", []) if item.get("selection", {}).get("status") == "selected"]
+                    attempted_before = {str(item.get("finding_id")) for item in previous_results}
+            except (OSError, ValueError, TypeError, json.JSONDecodeError):
+                previous_results = []
+                attempted_before = set()
+        selected = _balanced_reproduction_candidates([finding for finding in ranked if finding["id"] not in attempted_before], max_candidates)
         selected_ids = {finding["id"] for finding in selected}
-        results = []
+        results = list(previous_results)
         for finding in selected:
             result = {"finding_id": finding["id"], "priority": finding["priority"], "stages": {}, "status": "blocked"}
             result["selection"] = {"status": "selected", "strategy": "language_and_vulnerability_class_round_robin", "runtime": _runtime_family(finding)}
@@ -3116,7 +3128,8 @@ class ResearchOrchestrator:
                 result["stages"]["error"] = {"status": "blocked", "message": str(exc)[-500:]}
             results.append(result)
         unsupported = [finding for finding in ranked if not finding.get("auto_reproduction_supported")]
-        deferred_supported = [finding for finding in ranked if finding.get("auto_reproduction_supported") and finding["id"] not in selected_ids]
+        attempted_all = attempted_before | selected_ids
+        deferred_supported = [finding for finding in ranked if finding.get("auto_reproduction_supported") and finding["id"] not in attempted_all]
         for finding in unsupported:
             results.append({
                 "finding_id": finding["id"],
@@ -3136,13 +3149,14 @@ class ResearchOrchestrator:
             "execution_budget": max_candidates,
             "eligible_candidates": len(selected) + len(deferred_supported),
             "attempted_candidates": len(selected),
+            "attempted_candidates_total": len(attempted_all),
+            "resumed": resume and bool(attempted_before),
             "deferred_supported_candidates": len(deferred_supported),
             "automation_unavailable_candidates": len(unsupported),
             "selection_strategy": "supported_language_and_vulnerability_class_round_robin",
             "results": results,
             "generated_at": datetime.now(timezone.utc).isoformat(),
         }
-        output = audit_file.parent / "orchestration.json"
         output.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
         if timeline_db:
             store = Store(timeline_db)

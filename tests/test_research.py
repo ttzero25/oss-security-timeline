@@ -773,6 +773,25 @@ print(result.stdout)
             self.assertEqual(result["results"][0]["finding_id"], supported["id"])
             self.assertEqual(result["results"][1]["status"], "automation_unavailable")
 
+    def test_orchestrator_resume_advances_to_deferred_candidate(self):
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)
+            repo = self._checkout(folder)
+            extra = repo / "second.py"
+            extra.write_text('import os\ndef run(command):\n    return os.system(command)\n', encoding="utf-8")
+            subprocess.run(["git", "-C", str(repo), "add", "second.py"], check=True)
+            subprocess.run(["git", "-C", str(repo), "-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "-qm", "second"], check=True)
+            audit_file = audit(repo, "fixture/resume", folder / "research")
+            first = json.loads(ResearchOrchestrator().run(audit_file, max_candidates=1).read_text())
+            first_id = next(item["finding_id"] for item in first["results"] if item.get("selection", {}).get("status") == "selected")
+            second = json.loads(ResearchOrchestrator().run(audit_file, max_candidates=1, resume=True).read_text())
+            selected_ids = [item["finding_id"] for item in second["results"] if item.get("selection", {}).get("status") == "selected"]
+            self.assertEqual(second["attempted_candidates"], 1)
+            self.assertEqual(second["attempted_candidates_total"], 2)
+            self.assertTrue(second["resumed"])
+            self.assertIn(first_id, selected_ids)
+            self.assertEqual(len(set(selected_ids)), 2)
+
     @unittest.skipUnless(shutil.which("node"), "Node.js is required")
     def test_orchestrator_reproduces_bounded_typescript_candidate(self):
         with tempfile.TemporaryDirectory() as temp:
