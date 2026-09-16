@@ -29,22 +29,29 @@ class BenchmarkTests(unittest.TestCase):
             self.assertTrue(benchmark_passes(result, 1.0, 0))
             self.assertEqual(json.loads(output.read_text())["manifest_sha256"], result["manifest_sha256"])
 
-    def test_default_corpus_records_known_false_positive(self):
+    def test_default_corpus_passes_after_known_semantic_fixes(self):
         result = run_benchmark(Path("benchmarks/corpus.json"))
         self.assertEqual(result["metrics"]["total_cases"], 11)
-        self.assertEqual(result["metrics"]["false_negative_cases"], 1)
+        self.assertEqual(result["metrics"]["false_negative_cases"], 0)
+        self.assertEqual(result["metrics"]["false_positive_cases"], 0)
         allowlist = next(case for case in result["cases"] if case["id"] == "python-allowlist-command")
-        self.assertFalse(allowlist["passed"])
-        self.assertIn("command_injection", allowlist["found_kinds"])
+        self.assertTrue(allowlist["passed"])
+        self.assertEqual(allowlist["found_kinds"], [])
         method_dispatch = next(case for case in result["cases"] if case["id"] == "python-method-multihop")
-        self.assertFalse(method_dispatch["passed"])
-        self.assertEqual(method_dispatch["found_kinds"], [])
+        self.assertTrue(method_dispatch["passed"])
+        self.assertIn("command_injection", method_dispatch["found_kinds"])
 
     def test_cli_threshold_can_fail_a_regression_gate(self):
         with tempfile.TemporaryDirectory() as temp:
-            output = Path(temp) / "result.json"
+            root = Path(temp)
+            case = root / "conditional"
+            case.mkdir()
+            (case / "app.py").write_text('import subprocess\n\ndef handle(request):\n    action = request.args["action"]\n    command = "printf status" if action == "status" else "printf version"\n    return subprocess.run(command, shell=True)\n', encoding="utf-8")
+            corpus = root / "corpus.json"
+            corpus.write_text(json.dumps({"schema_version": 1, "cases": [{"id": "conditional", "path": "conditional", "expectation": "clean", "expected_kinds": []}]}), encoding="utf-8")
+            output = root / "result.json"
             with redirect_stdout(io.StringIO()):
-                code = main(["benchmark", "--corpus", "benchmarks/corpus.json", "--output", str(output), "--min-recall", "1", "--max-false-positive-cases", "0"])
+                code = main(["benchmark", "--corpus", str(corpus), "--output", str(output), "--max-false-positive-cases", "0"])
             self.assertEqual(code, 2)
             self.assertTrue(output.is_file())
 

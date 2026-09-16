@@ -61,6 +61,30 @@ class ResearchTests(unittest.TestCase):
             self.assertEqual([step["role"] for step in linked[0].trace][0], "source")
             self.assertEqual([step["role"] for step in linked[0].trace][-1], "sink")
 
+    def test_python_scan_traces_imported_instance_method(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "app.py").write_text('''from worker import Worker\n\nclass App:\n    def post(self, path):\n        return lambda fn: fn\napp = App()\nworker = Worker()\n\n@app.post("/run")\ndef route(command):\n    return worker.execute(command)\n''', encoding="utf-8")
+            (root / "worker.py").write_text('''import subprocess\n\nclass Worker:\n    def execute(self, value):\n        return subprocess.run(value, shell=True)\n''', encoding="utf-8")
+            findings, _ = SourceScanAgent().run(root, "fixture/method", "e" * 40)
+            linked = [item for item in findings if item.function == "route" and item.sink_path == "worker.py"]
+            self.assertEqual(len(linked), 1)
+            self.assertTrue(any(step.get("callee") == "worker:Worker.execute" for step in linked[0].trace))
+
+    def test_python_scan_treats_immutable_literal_allowlist_as_sanitizer(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "safe.py").write_text('''import subprocess\nALLOWED = {"status": "printf status"}\n\ndef handle(request):\n    action = request.args["action"]\n    command = ALLOWED[action]\n    return subprocess.run(command, shell=True)\n''', encoding="utf-8")
+            findings, _ = SourceScanAgent().run(root, "fixture/allowlist", "f" * 40)
+            self.assertEqual(findings, [])
+
+    def test_python_scan_does_not_trust_mutated_allowlist(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "unsafe.py").write_text('''import subprocess\nALLOWED = {"status": "printf status"}\n\ndef handle(request):\n    action = request.args["action"]\n    ALLOWED["dynamic"] = request.args["command"]\n    command = ALLOWED[action]\n    return subprocess.run(command, shell=True)\n''', encoding="utf-8")
+            findings, _ = SourceScanAgent().run(root, "fixture/mutated", "0" * 40)
+            self.assertTrue(any(item.kind == "command_injection" for item in findings))
+
     def test_repository_profile_records_packages_languages_and_entrypoints(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

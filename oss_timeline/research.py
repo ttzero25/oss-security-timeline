@@ -134,6 +134,55 @@ def _request_source(node: ast.AST) -> bool:
     return False
 
 
+def _literal_value(node: ast.AST) -> bool:
+    if isinstance(node, ast.Constant):
+        return True
+    if isinstance(node, (ast.Tuple, ast.List, ast.Set)):
+        return all(_literal_value(item) for item in node.elts)
+    if isinstance(node, ast.Dict):
+        return all(key is not None and _literal_value(key) and _literal_value(value) for key, value in zip(node.keys, node.values))
+    return False
+
+
+def _constant_lookup_tables(tree: ast.Module) -> set[str]:
+    """Find module-level literal mappings that are assigned once and never mutated."""
+    assignments: dict[str, int] = {}
+    candidates = set()
+    for node in tree.body:
+        if isinstance(node, (ast.Assign, ast.AnnAssign)) and node.value is not None:
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            names = {sub.id for target in targets for sub in ast.walk(target) if isinstance(sub, ast.Name) and isinstance(sub.ctx, ast.Store)}
+            for name in names:
+                assignments[name] = assignments.get(name, 0) + 1
+                if isinstance(node.value, ast.Dict) and _literal_value(node.value):
+                    candidates.add(name)
+    mutators = {"clear", "pop", "popitem", "setdefault", "update", "__setitem__"}
+    writes: dict[str, int] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            for target in targets:
+                for sub in ast.walk(target):
+                    if isinstance(sub, ast.Name) and isinstance(sub.ctx, ast.Store):
+                        writes[sub.id] = writes.get(sub.id, 0) + 1
+            value = node.value
+            if isinstance(value, ast.Name) and value.id in candidates:
+                candidates.discard(value.id)
+        if isinstance(node, ast.Subscript) and isinstance(node.ctx, (ast.Store, ast.Del)) and isinstance(node.value, ast.Name):
+            candidates.discard(node.value.id)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name) and node.func.attr in mutators:
+            candidates.discard(node.func.value.id)
+    return {name for name in candidates if assignments.get(name) == 1 and writes.get(name) == 1}
+
+
+def _safe_allowlist_lookup(node: ast.AST, tables: set[str]) -> bool:
+    if isinstance(node, ast.Subscript) and isinstance(node.value, ast.Name):
+        return node.value.id in tables
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name):
+        return node.func.value.id in tables and node.func.attr == "get"
+    return False
+
+
 def _name_refs(node: ast.AST) -> set[str]:
     return {x.id for x in ast.walk(node) if isinstance(x, ast.Name) and isinstance(x.ctx, ast.Load)}
 
@@ -271,6 +320,7 @@ def _python_hypotheses(filename: Path, root: Path, repo: str, commit: str) -> li
     lines = text.splitlines()
     output = []
     path = filename.relative_to(root).as_posix()
+    allowlists = _constant_lookup_tables(tree)
     for function in (x for x in ast.walk(tree) if isinstance(x, (ast.FunctionDef, ast.AsyncFunctionDef))):
         assigned: dict[str, tuple[int, str]] = {}
         http_route = any(isinstance(decorator, ast.Call) and _qualified(decorator.func).rsplit(".", 1)[-1] in {"route", "get", "post", "put", "patch", "delete"} and decorator.args and isinstance(decorator.args[0], ast.Constant) and isinstance(decorator.args[0].value, str) and decorator.args[0].value.startswith("/") for decorator in function.decorator_list)
@@ -283,13 +333,19 @@ def _python_hypotheses(filename: Path, root: Path, repo: str, commit: str) -> li
                 value = node.value
                 if value is None:
                     continue
+                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                if _safe_allowlist_lookup(value, allowlists):
+                    for target in targets:
+                        for sub in ast.walk(target):
+                            if isinstance(sub, ast.Name):
+                                assigned.pop(sub.id, None)
+                    continue
                 origin = None
                 if _request_source(value):
                     origin = (value.lineno, lines[value.lineno - 1])
                 else:
                     origin = next((assigned[name] for name in _name_refs(value) if name in assigned), None)
                 if origin:
-                    targets = node.targets if isinstance(node, ast.Assign) else [node.target]
                     for target in targets:
                         for sub in ast.walk(target):
                             if isinstance(sub, ast.Name):
@@ -299,6 +355,8 @@ def _python_hypotheses(filename: Path, root: Path, repo: str, commit: str) -> li
                 if not sink:
                     continue
                 kind, argument = sink
+                if _safe_allowlist_lookup(argument, allowlists):
+                    continue
                 if _request_source(argument):
                     source = (argument.lineno, lines[argument.lineno - 1])
                 else:
@@ -317,6 +375,7 @@ def _python_interprocedural_hypotheses(filename: Path, root: Path, repo: str, co
     except (OSError, UnicodeError, SyntaxError):
         return []
     lines = text.splitlines()
+    allowlists = _constant_lookup_tables(tree)
     functions = [node for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))]
     summaries: dict[str, list[dict]] = {}
     for function in functions:
@@ -324,6 +383,8 @@ def _python_interprocedural_hypotheses(filename: Path, root: Path, repo: str, co
         origins = {name: name for name in parameters}
         for node in ast.walk(function):
             if isinstance(node, (ast.Assign, ast.AnnAssign)) and node.value is not None:
+                if _safe_allowlist_lookup(node.value, allowlists):
+                    continue
                 origin = next((origins[name] for name in _name_refs(node.value) if name in origins), None)
                 if origin:
                     targets = node.targets if isinstance(node, ast.Assign) else [node.target]
@@ -333,6 +394,8 @@ def _python_interprocedural_hypotheses(filename: Path, root: Path, repo: str, co
                                 origins[sub.id] = origin
             if isinstance(node, ast.Call) and (sink := _sink_kind(node)):
                 kind, argument = sink
+                if _safe_allowlist_lookup(argument, allowlists):
+                    continue
                 parameter = next((origins[name] for name in _name_refs(argument) if name in origins), None)
                 if parameter:
                     summaries.setdefault(function.name, []).append({"parameter": parameter, "kind": kind, "sink_line": node.lineno, "sink_code": lines[node.lineno - 1]})
@@ -383,7 +446,7 @@ def _python_module_name(path: Path) -> str:
 
 
 def _python_multihop_hypotheses(files: list[Path], root: Path, repo: str, commit: str, max_depth: int = 4) -> list[Hypothesis]:
-    """Trace route/request input through top-level Python functions across modules."""
+    """Trace route/request input through bounded functions and resolvable methods."""
     modules: dict[str, dict] = {}
     functions: dict[str, dict] = {}
     for filename in files:
@@ -412,10 +475,35 @@ def _python_multihop_hypotheses(files: list[Path], root: Path, repo: str, commit
                 base = ".".join(base_parts)
                 for alias in node.names:
                     imports[alias.asname or alias.name] = ".".join(part for part in (base, alias.name) if part)
-        modules[module] = {"path": relative.as_posix(), "lines": lines, "imports": imports}
+        classes = {node.name for node in tree.body if isinstance(node, ast.ClassDef)}
+        instances: dict[str, str] = {}
+        for node in tree.body:
+            if not isinstance(node, (ast.Assign, ast.AnnAssign)) or not isinstance(node.value, ast.Call):
+                continue
+            constructor = _qualified(node.value.func)
+            class_path = None
+            if constructor in classes:
+                class_path = f"{module}.{constructor}"
+            elif constructor in imports and constructor[:1].isupper():
+                class_path = imports[constructor]
+            elif "." in constructor:
+                head, tail = constructor.split(".", 1)
+                if head in imports and tail[:1].isupper():
+                    class_path = f'{imports[head]}.{tail}'
+            if class_path:
+                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                for target in targets:
+                    if isinstance(target, ast.Name):
+                        instances[target.id] = class_path
+        module_info = {"path": relative.as_posix(), "lines": lines, "imports": imports, "instances": instances, "allowlists": _constant_lookup_tables(tree)}
+        modules[module] = module_info
         for node in tree.body:
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                functions[f"{module}:{node.name}"] = {"node": node, "module": module, "path": relative.as_posix(), "lines": lines, "imports": imports}
+                functions[f"{module}:{node.name}"] = {**module_info, "node": node, "module": module, "owner": None}
+            elif isinstance(node, ast.ClassDef):
+                for method in node.body:
+                    if isinstance(method, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                        functions[f"{module}:{node.name}.{method.name}"] = {**module_info, "node": method, "module": module, "owner": node.name}
 
     def resolve_callee(info: dict, call: ast.Call) -> str | None:
         qualified = _qualified(call.func)
@@ -432,9 +520,29 @@ def _python_multihop_hypotheses(files: list[Path], root: Path, repo: str, commit
                 return f"{candidate[0]}:{candidate[1]}"
             return None
         head, tail = qualified.split(".", 1)
+        instance_class = info["instances"].get(head)
+        if instance_class and "." in instance_class:
+            class_module, class_name = instance_class.rsplit(".", 1)
+            candidate = f"{class_module}:{class_name}.{tail}"
+            if candidate in functions:
+                return candidate
+        if head == "self" and info.get("owner"):
+            candidate = f'{module}:{info["owner"]}.{tail}'
+            if candidate in functions:
+                return candidate
         imported_module = info["imports"].get(head)
         if imported_module and "." not in tail:
-            return f"{imported_module}:{tail}"
+            module_candidate = f"{imported_module}:{tail}"
+            if module_candidate in functions:
+                return module_candidate
+            if "." in imported_module:
+                class_module, class_name = imported_module.rsplit(".", 1)
+                method_candidate = f"{class_module}:{class_name}.{tail}"
+                if method_candidate in functions:
+                    return method_candidate
+        local_method = f"{module}:{head}.{tail}"
+        if local_method in functions:
+            return local_method
         return None
 
     def parameter_origins(info: dict) -> tuple[list[str], dict[str, str]]:
@@ -443,6 +551,8 @@ def _python_multihop_hypotheses(files: list[Path], root: Path, repo: str, commit
         origins = {name: name for name in parameters}
         for child in ast.walk(node):
             if isinstance(child, (ast.Assign, ast.AnnAssign)) and child.value is not None:
+                if _safe_allowlist_lookup(child.value, info["allowlists"]):
+                    continue
                 origin = next((origins[name] for name in _name_refs(child.value) if name in origins), None)
                 if origin:
                     targets = child.targets if isinstance(child, ast.Assign) else [child.target]
@@ -454,12 +564,21 @@ def _python_multihop_hypotheses(files: list[Path], root: Path, repo: str, commit
 
     summaries: dict[str, list[dict]] = {key: [] for key in functions}
     origins_by_function = {key: parameter_origins(info) for key, info in functions.items()}
+
+    def callable_parameters(key: str) -> list[str]:
+        parameters = origins_by_function[key][0]
+        if functions[key].get("owner") and parameters and parameters[0] in {"self", "cls"}:
+            return parameters[1:]
+        return parameters
+
     for key, info in functions.items():
         _, origins = origins_by_function[key]
         for node in ast.walk(info["node"]):
             if not isinstance(node, ast.Call) or not (sink := _sink_kind(node)):
                 continue
             kind, argument = sink
+            if _safe_allowlist_lookup(argument, info["allowlists"]):
+                continue
             parameter = next((origins[name] for name in _name_refs(argument) if name in origins), None)
             if parameter:
                 summaries[key].append({"parameter": parameter, "kind": kind, "sink_path": info["path"], "sink_line": node.lineno, "sink_code": info["lines"][node.lineno - 1], "trace": [{"role": "sink", "path": info["path"], "line": node.lineno, "function": info["node"].name, "code": info["lines"][node.lineno - 1].strip()[:240]}]})
@@ -472,7 +591,7 @@ def _python_multihop_hypotheses(files: list[Path], root: Path, repo: str, commit
                 callee = resolve_callee(info, call)
                 if not callee or callee not in summaries or callee == key:
                     continue
-                callee_parameters = origins_by_function[callee][0]
+                callee_parameters = callable_parameters(callee)
                 supplied = {callee_parameters[index]: value for index, value in enumerate(call.args) if index < len(callee_parameters)}
                 supplied.update({keyword.arg: keyword.value for keyword in call.keywords if keyword.arg})
                 for downstream in list(summaries[callee]):
@@ -506,7 +625,7 @@ def _python_multihop_hypotheses(files: list[Path], root: Path, repo: str, commit
             callee = resolve_callee(info, call)
             if not callee or callee not in summaries:
                 continue
-            callee_parameters = origins_by_function[callee][0]
+            callee_parameters = callable_parameters(callee)
             supplied = {callee_parameters[index]: value for index, value in enumerate(call.args) if index < len(callee_parameters)}
             supplied.update({keyword.arg: keyword.value for keyword in call.keywords if keyword.arg})
             for downstream in summaries[callee]:
