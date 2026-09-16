@@ -428,7 +428,7 @@ class Store:
             PRAGMA foreign_keys=ON;
             CREATE TABLE IF NOT EXISTS repositories (name TEXT PRIMARY KEY, url TEXT NOT NULL, last_sync TEXT, coverage TEXT NOT NULL DEFAULT '{}', warnings TEXT NOT NULL DEFAULT '[]');
             CREATE TABLE IF NOT EXISTS packages (repo TEXT NOT NULL, ecosystem TEXT NOT NULL, name TEXT NOT NULL, manifest TEXT NOT NULL, PRIMARY KEY(repo, ecosystem, name, manifest));
-            CREATE TABLE IF NOT EXISTS advisories (id TEXT PRIMARY KEY, ghsa TEXT, cve TEXT, published_at TEXT, modified_at TEXT, first_seen TEXT NOT NULL, last_seen TEXT NOT NULL, summary TEXT, severity TEXT, cvss REAL, cwe_ids TEXT NOT NULL DEFAULT '[]', cwe_names TEXT NOT NULL DEFAULT '{}', url TEXT, sources TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS advisories (id TEXT PRIMARY KEY, ghsa TEXT, cve TEXT, published_at TEXT, modified_at TEXT, first_seen TEXT NOT NULL, last_seen TEXT NOT NULL, summary TEXT, severity TEXT, cvss REAL, cwe_ids TEXT NOT NULL DEFAULT '[]', cwe_names TEXT NOT NULL DEFAULT '{}', url TEXT, sources TEXT NOT NULL, references_json TEXT NOT NULL DEFAULT '[]');
             CREATE TABLE IF NOT EXISTS advisory_observations (advisory_id TEXT NOT NULL, observed_at TEXT NOT NULL, modified_at TEXT, content_hash TEXT NOT NULL, PRIMARY KEY(advisory_id,content_hash));
             CREATE TABLE IF NOT EXISTS advisory_repos (advisory_id TEXT NOT NULL, repo TEXT NOT NULL, PRIMARY KEY(advisory_id, repo));
             CREATE TABLE IF NOT EXISTS advisory_packages (advisory_id TEXT NOT NULL, repo TEXT NOT NULL, ecosystem TEXT NOT NULL, name TEXT NOT NULL, version_range TEXT, patched TEXT, PRIMARY KEY(advisory_id, repo, ecosystem, name));
@@ -455,6 +455,8 @@ class Store:
             self.db.execute("ALTER TABLE advisories ADD COLUMN cwe_ids TEXT NOT NULL DEFAULT '[]'")
         if "cwe_names" not in advisory_columns:
             self.db.execute("ALTER TABLE advisories ADD COLUMN cwe_names TEXT NOT NULL DEFAULT '{}'")
+        if "references_json" not in advisory_columns:
+            self.db.execute("ALTER TABLE advisories ADD COLUMN references_json TEXT NOT NULL DEFAULT '[]'")
 
     def save(self, result: Collection) -> None:
         stamp = now()
@@ -469,11 +471,12 @@ class Store:
                     raw = {**raw, "id": matched["id"]}
                 existing = self.db.execute("SELECT * FROM advisories WHERE id=?", (raw["id"],)).fetchone()
                 sources = sorted(set((json.loads(existing["sources"]) if existing else []) + [raw["source"]]))
+                references = sorted(set(json.loads(existing["references_json"]) if existing else []) | set(raw.get("references") or []))
                 cwe_ids = sorted(set(json.loads(existing["cwe_ids"]) if existing else []) | set(raw.get("cwe_ids") or []))
                 cwe_names = {**(json.loads(existing["cwe_names"]) if existing else {}), **(raw.get("cwe_names") or {})}
                 chosen = raw if not existing or raw["source"] != "OSV" else dict(existing)
-                self.db.execute("INSERT INTO advisories(id,ghsa,cve,published_at,modified_at,first_seen,last_seen,summary,severity,cvss,cwe_ids,cwe_names,url,sources) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET ghsa=COALESCE(excluded.ghsa,advisories.ghsa),cve=COALESCE(excluded.cve,advisories.cve),published_at=COALESCE(excluded.published_at,advisories.published_at),modified_at=COALESCE(excluded.modified_at,advisories.modified_at),last_seen=excluded.last_seen,summary=CASE WHEN excluded.summary!='' THEN excluded.summary ELSE advisories.summary END,severity=CASE WHEN excluded.severity!='unknown' THEN excluded.severity ELSE advisories.severity END,cvss=COALESCE(excluded.cvss,advisories.cvss),cwe_ids=excluded.cwe_ids,cwe_names=excluded.cwe_names,url=COALESCE(excluded.url,advisories.url),sources=excluded.sources", (raw["id"], raw.get("ghsa"), raw.get("cve"), raw.get("published_at"), raw.get("modified_at"), existing["first_seen"] if existing else stamp, stamp, chosen.get("summary") or "", chosen.get("severity") or "unknown", chosen.get("cvss"), json.dumps(cwe_ids), json.dumps(cwe_names, ensure_ascii=False), chosen.get("url"), json.dumps(sources)))
-                current = self.db.execute("SELECT ghsa,cve,published_at,modified_at,summary,severity,cvss,cwe_ids,cwe_names FROM advisories WHERE id=?", (raw["id"],)).fetchone()
+                self.db.execute("INSERT INTO advisories(id,ghsa,cve,published_at,modified_at,first_seen,last_seen,summary,severity,cvss,cwe_ids,cwe_names,url,sources,references_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET ghsa=COALESCE(excluded.ghsa,advisories.ghsa),cve=COALESCE(excluded.cve,advisories.cve),published_at=COALESCE(excluded.published_at,advisories.published_at),modified_at=COALESCE(excluded.modified_at,advisories.modified_at),last_seen=excluded.last_seen,summary=CASE WHEN excluded.summary!='' THEN excluded.summary ELSE advisories.summary END,severity=CASE WHEN excluded.severity!='unknown' THEN excluded.severity ELSE advisories.severity END,cvss=COALESCE(excluded.cvss,advisories.cvss),cwe_ids=excluded.cwe_ids,cwe_names=excluded.cwe_names,url=COALESCE(excluded.url,advisories.url),sources=excluded.sources,references_json=excluded.references_json", (raw["id"], raw.get("ghsa"), raw.get("cve"), raw.get("published_at"), raw.get("modified_at"), existing["first_seen"] if existing else stamp, stamp, chosen.get("summary") or "", chosen.get("severity") or "unknown", chosen.get("cvss"), json.dumps(cwe_ids), json.dumps(cwe_names, ensure_ascii=False), chosen.get("url"), json.dumps(sources), json.dumps(references)))
+                current = self.db.execute("SELECT ghsa,cve,published_at,modified_at,summary,severity,cvss,cwe_ids,cwe_names,references_json FROM advisories WHERE id=?", (raw["id"],)).fetchone()
                 fingerprint = hashlib.sha256(json.dumps(dict(current), sort_keys=True).encode()).hexdigest()
                 self.db.execute("INSERT OR IGNORE INTO advisory_observations VALUES(?,?,?,?)", (raw["id"], stamp, current["modified_at"], fingerprint))
                 self.db.execute("INSERT OR IGNORE INTO advisory_repos VALUES(?,?)", (raw["id"], result.repo))

@@ -1445,9 +1445,20 @@ def _public_context(timeline_db: Path | None, repo: str) -> dict:
         connection = sqlite3.connect(f"file:{timeline_db.resolve()}?mode=ro", uri=True)
         connection.row_factory = sqlite3.Row
         row = connection.execute("SELECT last_sync,coverage FROM repositories WHERE name=?", (repo,)).fetchone()
-        known = [dict(x) for x in connection.execute("SELECT a.id,a.ghsa,a.cve,a.summary,a.published_at,a.sources FROM advisories a JOIN advisory_repos ar ON ar.advisory_id=a.id WHERE ar.repo=? ORDER BY a.published_at DESC", (repo,))]
+        known = [dict(x) for x in connection.execute("SELECT a.id,a.ghsa,a.cve,a.summary,a.published_at,a.modified_at,a.cwe_ids,a.url,a.sources,a.references_json FROM advisories a JOIN advisory_repos ar ON ar.advisory_id=a.id WHERE ar.repo=? ORDER BY a.published_at DESC", (repo,))]
+        for advisory in known:
+            advisory["cwe_ids"] = json.loads(advisory.get("cwe_ids") or "[]")
+            advisory["references"] = json.loads(advisory.pop("references_json", "[]") or "[]")
+            advisory["packages"] = [dict(item) for item in connection.execute("SELECT ecosystem,name,version_range,patched FROM advisory_packages WHERE advisory_id=? AND repo=?", (advisory["id"], repo))]
         connection.close()
-        return {"status": "snapshot" if row else "repo_not_synced", "last_sync": row["last_sync"] if row else None, "coverage": json.loads(row["coverage"]) if row else {}, "known_advisories": known}
+        age_hours = None
+        if row and row["last_sync"]:
+            try:
+                synchronized = datetime.fromisoformat(row["last_sync"].replace("Z", "+00:00"))
+                age_hours = round((datetime.now(timezone.utc) - synchronized).total_seconds() / 3600, 2)
+            except ValueError:
+                pass
+        return {"status": "snapshot" if row else "repo_not_synced", "last_sync": row["last_sync"] if row else None, "snapshot_age_hours": age_hours, "fresh": age_hours is not None and age_hours <= 168, "coverage": json.loads(row["coverage"]) if row else {}, "known_advisories": known}
     except sqlite3.DatabaseError:
         return {"status": "unreadable", "known_advisories": []}
 
@@ -1730,24 +1741,54 @@ class DuplicateReviewAgent:
         "code_execution": {"code execution", "eval", "injection", "CWE-94"},
         "unsafe_deserialization": {"deserialization", "pickle", "CWE-502"},
         "possible_ssrf": {"SSRF", "server-side request", "CWE-918"},
+        "sql_injection": {"SQL injection", "query injection", "CWE-89"},
+        "template_injection": {"template injection", "SSTI", "CWE-1336"},
+        "path_traversal": {"path traversal", "directory traversal", "CWE-22"},
     }
+    CWE = {"command_injection": "CWE-78", "code_execution": "CWE-94", "unsafe_deserialization": "CWE-502", "possible_ssrf": "CWE-918", "sql_injection": "CWE-89", "template_injection": "CWE-1336", "path_traversal": "CWE-22"}
 
     def run(self, audit_data: dict, finding: dict) -> dict:
         context = audit_data.get("public_context", {})
         advisories = context.get("known_advisories", [])
         if context.get("status") != "snapshot":
             return {"status": "insufficient_public_context", "checked": 0, "matches": [], "scope": "수집된 GitHub·OSV 공개 공지 스냅샷", "manual_review_required": True}
+        if context.get("fresh") is False:
+            return {"status": "stale_public_context", "checked": len(advisories), "matches": [], "scope": "수집 후 7일이 지난 GitHub·OSV 공개 공지 스냅샷", "snapshot_age_hours": context.get("snapshot_age_hours"), "manual_review_required": True}
         terms = self.KEYWORDS.get(finding.get("kind"), {finding.get("kind", "")})
+        expected_cwe = self.CWE.get(finding.get("kind"))
+        code_tokens = {finding.get("function", ""), Path(finding.get("source_path") or finding.get("path", "")).stem, Path(finding.get("sink_path") or finding.get("path", "")).stem}
+        code_tokens = {token.lower() for token in code_tokens if len(token) >= 4 and token not in {"handle", "handler", "route", "main"}}
         matches = []
         for advisory in advisories:
-            haystack = " ".join(str(advisory.get(key) or "") for key in ("id", "ghsa", "cve", "summary", "sources")).lower()
-            if any(term and term.lower() in haystack for term in terms):
-                matches.append({key: advisory.get(key) for key in ("id", "ghsa", "cve", "summary", "sources")})
+            references = advisory.get("references") or []
+            haystack = " ".join([*(str(advisory.get(key) or "") for key in ("id", "ghsa", "cve", "summary", "sources", "url")), *map(str, references)]).lower()
+            reasons, score = [], 0
+            matched_terms = sorted(term for term in terms if term and term.lower() in haystack)
+            if matched_terms:
+                score += 2
+                reasons.append("취약점 유형 용어: " + ", ".join(matched_terms))
+            if expected_cwe and expected_cwe in set(advisory.get("cwe_ids") or []):
+                score += 4
+                reasons.append("동일 CWE " + expected_cwe)
+            matched_tokens = sorted(token for token in code_tokens if token in haystack)
+            if matched_tokens:
+                score += min(4, len(matched_tokens) * 2)
+                reasons.append("코드 경로/함수 토큰: " + ", ".join(matched_tokens))
+            commit = str(finding.get("commit") or "").lower()
+            if len(commit) >= 7 and any(commit in str(reference).lower() for reference in references):
+                score += 8
+                reasons.append("분석 커밋이 공지 참조에 포함됨")
+            if score:
+                relation = "known_duplicate" if score >= 6 else "possible_variant"
+                matches.append({**{key: advisory.get(key) for key in ("id", "ghsa", "cve", "summary", "sources", "cwe_ids", "packages", "references")}, "score": score, "relation": relation, "reasons": reasons})
+        matches.sort(key=lambda item: (-item["score"], str(item.get("id") or "")))
         return {
             "status": "possible_duplicate" if matches else "no_match_in_collected_snapshot",
+            "classification": "known_duplicate" if any(item["relation"] == "known_duplicate" for item in matches) else "possible_variant" if matches else "no_structured_match",
             "checked": len(advisories),
-            "matches": matches,
+            "matches": matches[:20],
             "scope": "수집된 GitHub·OSV 공개 공지 스냅샷",
+            "snapshot_age_hours": context.get("snapshot_age_hours"),
             "manual_review_required": True,
         }
 

@@ -93,7 +93,7 @@ class TimelineTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             store = Store(Path(temp) / "db.sqlite3")
             collection = Collection("example/demo", packages=[("npm", "demo", "package.json")], coverage={"inventory": True})
-            advisory = {"id": "GHSA-aaaa-bbbb-cccc", "ghsa": "GHSA-aaaa-bbbb-cccc", "cve": "CVE-2023-1234", "published_at": "2023-01-01T00:00:00Z", "modified_at": "2023-01-02T00:00:00Z", "summary": "Issue", "severity": "high", "cvss": 7.5, "url": "https://github.com/advisories/GHSA-aaaa-bbbb-cccc", "source": "GitHub", "affected": [{"ecosystem": "npm", "name": "demo", "range": "< 1.1", "patched": "1.1"}]}
+            advisory = {"id": "GHSA-aaaa-bbbb-cccc", "ghsa": "GHSA-aaaa-bbbb-cccc", "cve": "CVE-2023-1234", "published_at": "2023-01-01T00:00:00Z", "modified_at": "2023-01-02T00:00:00Z", "summary": "Issue", "severity": "high", "cvss": 7.5, "url": "https://github.com/advisories/GHSA-aaaa-bbbb-cccc", "source": "GitHub", "references": ["https://github.com/example/demo/commit/abc"], "affected": [{"ecosystem": "npm", "name": "demo", "range": "< 1.1", "patched": "1.1"}]}
             collection.advisories = [advisory, {**advisory, "id": "CVE-2023-1234", "ghsa": None, "source": "OSV", "cvss": None}]
             collection.events = [{"id": "commit:abc", "kind": "commit", "at": "2023-01-03T00:00:00Z", "title": "Fix", "url": "https://github.com/example/demo/commit/abc"}]
             store.save(collection)
@@ -105,6 +105,7 @@ class TimelineTests(unittest.TestCase):
             self.assertEqual(sum(x["kind"] == "advisory" for x in report["timeline"]), 1)
             self.assertEqual(store.db.execute("SELECT first_seen FROM advisories").fetchone()[0], first)
             self.assertEqual(set(json.loads(store.db.execute("SELECT sources FROM advisories").fetchone()[0])), {"GitHub", "OSV"})
+            self.assertEqual(json.loads(store.db.execute("SELECT references_json FROM advisories").fetchone()[0]), ["https://github.com/example/demo/commit/abc"])
             self.assertEqual(len(report["advisory_observations"]), 1)
             store.db.close()
 

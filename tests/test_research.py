@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 
 from oss_timeline.core import Collection, Store
-from oss_timeline.research import BuildEnvironmentAgent, DisclosureAgent, LimitedPocAgent, PocValidatorAgent, RepositoryProfilerAgent, ResearchOrchestrator, SemanticAnalysisAgent, SourceScanAgent, audit, claim_template, prepare_poc
+from oss_timeline.research import BuildEnvironmentAgent, DisclosureAgent, DuplicateReviewAgent, LimitedPocAgent, PocValidatorAgent, RepositoryProfilerAgent, ResearchOrchestrator, SemanticAnalysisAgent, SourceScanAgent, audit, claim_template, prepare_poc
 
 
 FIXTURE = Path(__file__).parent / "fixtures" / "synthetic_app.py"
@@ -306,6 +306,19 @@ print(result.stdout)
             self.assertEqual(result["status"], "duplicate_review_required")
             self.assertEqual(result["stages"]["duplicate_review"]["status"], "possible_duplicate")
             self.assertFalse((audit_file.parent / result["finding_id"] / "GHSA_CANDIDATE.md").exists())
+
+    def test_duplicate_review_scores_cwe_code_path_and_commit_reference(self):
+        finding = {"kind": "command_injection", "function": "execute_job", "path": "service/runner.py", "source_path": "service/api.py", "sink_path": "service/runner.py", "commit": "abc123456789"}
+        audit_data = {"public_context": {"status": "snapshot", "fresh": True, "snapshot_age_hours": 1, "known_advisories": [{"id": "GHSA-aaaa-bbbb-cccc", "ghsa": "GHSA-aaaa-bbbb-cccc", "cve": "CVE-2026-1000", "summary": "Shell command injection in runner execute_job", "sources": '["GitHub"]', "cwe_ids": ["CWE-78"], "packages": [{"ecosystem": "pip", "name": "fixture"}], "references": ["https://github.com/example/demo/commit/abc123456789"]}]}}
+        review = DuplicateReviewAgent().run(audit_data, finding)
+        self.assertEqual(review["status"], "possible_duplicate")
+        self.assertEqual(review["classification"], "known_duplicate")
+        self.assertEqual(review["matches"][0]["relation"], "known_duplicate")
+        self.assertGreaterEqual(review["matches"][0]["score"], 6)
+
+    def test_duplicate_review_rejects_stale_snapshot(self):
+        review = DuplicateReviewAgent().run({"public_context": {"status": "snapshot", "fresh": False, "snapshot_age_hours": 200, "known_advisories": []}}, {"kind": "command_injection"})
+        self.assertEqual(review["status"], "stale_public_context")
 
     def test_orchestrator_reproduces_cross_module_route_trace(self):
         with tempfile.TemporaryDirectory() as temp:
