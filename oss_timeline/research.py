@@ -26,6 +26,9 @@ JS_SOURCE = re.compile(r"\b(?:req|request)\.(?:query|body|params|headers)(?:\.[A
 JS_SINKS = [
     ("command_injection", re.compile(r"\b(?:child_process\.)?exec(?:Sync)?\s*\(")),
     ("code_execution", re.compile(r"\beval\s*\(")),
+    ("possible_ssrf", re.compile(r"\b(?:fetch|axios\.(?:get|post|request)|https?\.(?:get|request))\s*\(")),
+    ("sql_injection", re.compile(r"\b[A-Za-z_$][\w$]*\.(?:query|execute)\s*\(")),
+    ("path_traversal", re.compile(r"\bfs\.(?:readFile|readFileSync|writeFile|writeFileSync|createReadStream|createWriteStream)\s*\(")),
 ]
 GO_SOURCE = re.compile(r"\b(?:r\.(?:FormValue|PostFormValue)\s*\(|r\.URL\.Query\(\)\.Get\s*\(|r\.Header\.Get\s*\(|(?:c|ctx)\.(?:Query|Param|PostForm|FormValue)\s*\(|os\.Args\s*\[|flag\.Arg\s*\(|os\.Getenv\s*\()")
 C_EXTENSIONS = {".c", ".h", ".cc", ".cpp", ".cxx", ".hpp"}
@@ -203,6 +206,12 @@ def _sink_kind(node: ast.Call) -> tuple[str, ast.AST] | None:
         return "unsafe_deserialization", node.args[0]
     if name in {"requests.get", "requests.post", "httpx.get", "httpx.post", "urllib.request.urlopen"}:
         return "possible_ssrf", node.args[0]
+    if name.endswith((".execute", ".executemany")) and not isinstance(node.args[0], ast.Constant):
+        return "sql_injection", node.args[0]
+    if name in {"render_template_string", "flask.render_template_string", "jinja2.Template"}:
+        return "template_injection", node.args[0]
+    if name in {"open", "os.open", "pathlib.Path", "Path"} or name.endswith((".read_text", ".read_bytes", ".write_text", ".write_bytes")):
+        return "path_traversal", node.args[0]
     return None
 
 
@@ -957,6 +966,17 @@ def _go_multihop_hypotheses(files: list[Path], root: Path, repo: str, commit: st
             url_index = 2 if "WithContext" in new_request.group(0) else 1
             if len(arguments) > url_index:
                 return "possible_ssrf", arguments[url_index]
+        sql = re.search(r"\b(?:Query|QueryRow|Exec)(Context)?\s*\((.*)", line)
+        if sql:
+            arguments = _go_arguments(sql.group(2))
+            query_index = 1 if sql.group(1) else 0
+            if len(arguments) > query_index and not arguments[query_index].lstrip().startswith(('"', '`')):
+                return "sql_injection", arguments[query_index]
+        filesystem = re.search(r"\bos\.(?:Open|ReadFile|WriteFile|Create)\s*\((.*)", line)
+        if filesystem:
+            arguments = _go_arguments(filesystem.group(1))
+            if arguments:
+                return "path_traversal", arguments[0]
         return None
 
     def analyze(info: dict) -> tuple[dict[str, tuple[str, int, str]], list[dict], list[dict]]:
@@ -1113,7 +1133,7 @@ class SourceScanAgent:
 
 class SemanticAnalysisAgent:
     """Prioritize hypotheses and allow automatic reproduction only for bounded safe templates."""
-    SCORES = {"command_injection": 90, "code_execution": 85, "unsafe_deserialization": 70, "possible_ssrf": 60, "format_string": 55, "unsafe_copy": 50}
+    SCORES = {"command_injection": 90, "code_execution": 85, "template_injection": 80, "sql_injection": 75, "unsafe_deserialization": 70, "path_traversal": 65, "possible_ssrf": 60, "format_string": 55, "unsafe_copy": 50}
 
     def run(self, hypotheses: list[dict], profile: dict | None = None) -> list[dict]:
         changed = (profile or {}).get("recent_changes", {}).get("files", {})
@@ -1158,7 +1178,7 @@ class ReachabilityGateAgent:
 
 class EvidenceGateAgent:
     """Apply explicit evidence gates before a private draft can be generated."""
-    HIGH_IMPACT = {"command_injection", "code_execution", "unsafe_deserialization", "unsafe_copy", "format_string"}
+    HIGH_IMPACT = {"command_injection", "code_execution", "template_injection", "sql_injection", "unsafe_deserialization", "unsafe_copy", "format_string"}
 
     def run(self, audit_data: dict, finding: dict, reachability: dict, evidence: dict, duplicate_review: dict) -> dict:
         trace = finding.get("trace") or []
