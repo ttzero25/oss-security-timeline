@@ -1592,7 +1592,10 @@ class SemanticAnalysisAgent:
         output = []
         for finding in hypotheses:
             suffix = Path(finding.get("path", "")).suffix
-            python_supported = suffix == ".py" and finding.get("kind") in {"command_injection", "code_execution"}
+            python_supported = suffix == ".py" and (
+                finding.get("kind") in {"command_injection", "code_execution"}
+                or finding.get("kind") == "possible_ssrf" and (finding.get("source_path") or finding.get("path")) == (finding.get("sink_path") or finding.get("path"))
+            )
             javascript_supported = suffix in {".js", ".mjs", ".cjs"} and finding.get("kind") in {"command_injection", "code_execution"} and (finding.get("source_path") or finding.get("path")) == (finding.get("sink_path") or finding.get("path"))
             go_supported = suffix == ".go" and finding.get("kind") == "command_injection" and (finding.get("source_path") or finding.get("path")) == (finding.get("sink_path") or finding.get("path"))
             supported = python_supported or javascript_supported or go_supported
@@ -1818,6 +1821,106 @@ if (result !== undefined) console.log(Buffer.isBuffer(result) ? result.toString(
         proof = destination / "proof.py"
         if proof.exists():
             raise ValueError("기존 PoC 작업물이 있어 자동 생성으로 덮어쓰지 않습니다")
+        if kind == "possible_ssrf":
+            target = top_level[0]
+            positional = [*target.args.posonlyargs, *target.args.args]
+            allowed_imports = {"requests", "httpx", "urllib", "urllib.request"}
+            imports = []
+            safe_top_level = True
+            for node in syntax.body:
+                if isinstance(node, ast.Import):
+                    imports.extend(alias.name for alias in node.names)
+                elif isinstance(node, ast.ImportFrom):
+                    imports.append(node.module or "")
+                elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    defaults = [*node.args.defaults, *(value for value in node.args.kw_defaults if value is not None)]
+                    annotations = [argument.annotation for argument in [*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs] if argument.annotation is not None]
+                    if node.args.vararg and node.args.vararg.annotation is not None:
+                        annotations.append(node.args.vararg.annotation)
+                    if node.args.kwarg and node.args.kwarg.annotation is not None:
+                        annotations.append(node.args.kwarg.annotation)
+                    if node.returns is not None:
+                        annotations.append(node.returns)
+                    safe_top_level = safe_top_level and not node.decorator_list and not annotations and all(isinstance(value, ast.Constant) for value in defaults)
+                elif not (isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str)):
+                    safe_top_level = False
+            allowed_sinks = {"requests.get", "requests.post", "httpx.get", "httpx.post", "urllib.request.urlopen"}
+            direct_calls = [node for node in ast.walk(target) if isinstance(node, ast.Call)]
+            direct_sink = len(direct_calls) == 1 and _qualified(direct_calls[0].func) in allowed_sinks
+            single_call_body = len(target.body) == 1 and isinstance(target.body[0], (ast.Return, ast.Expr)) and getattr(target.body[0], "value", None) is direct_calls[0] if direct_calls else False
+            parameter_name = positional[0].arg if len(positional) == 1 else ""
+            direct_input = bool(direct_calls and direct_calls[0].args and isinstance(direct_calls[0].args[0], ast.Name) and direct_calls[0].args[0].id == parameter_name)
+            if (
+                not safe_top_level
+                or any(name not in allowed_imports for name in imports)
+                or isinstance(target, ast.AsyncFunctionDef)
+                or len(positional) != 1
+                or target.args.vararg
+                or target.args.kwarg
+                or target.args.kwonlyargs
+                or not direct_sink
+                or not single_call_body
+                or not direct_input
+            ):
+                raise ValueError("자동 Python SSRF PoC는 허용된 HTTP import와 단일 직접 sink return을 쓰는 단일 인자 동기 함수로 제한됩니다")
+            source_bytes = source_file.read_bytes()
+            source_sha = hashlib.sha256(source_bytes).hexdigest()
+            script = f'''"""Network-blocked bounded SSRF reproduction for {finding["id"]}."""
+import hashlib
+import importlib.util
+import os
+import sys
+import types
+
+REPO = os.environ["OSS_POC_REPO"]
+MARKER = {marker!r}
+TARGET = os.path.join(REPO, {finding["path"]!r})
+
+class DummyResponse:
+    status_code = 200
+    text = ""
+    content = b""
+    def json(self):
+        return {{}}
+    def read(self, *_args, **_kwargs):
+        return b""
+    def __enter__(self):
+        return self
+    def __exit__(self, *_args):
+        return False
+
+def blocked_request(url, *_args, **_kwargs):
+    value = str(url)
+    print(MARKER if MARKER in value else "OSS_BENIGN_CONTROL")
+    return DummyResponse()
+
+def install_network_stubs():
+    for name in ("requests", "httpx"):
+        module = types.ModuleType(name)
+        module.get = blocked_request
+        module.post = blocked_request
+        module.request = lambda _method, url, *_args, **_kwargs: blocked_request(url)
+        sys.modules[name] = module
+    import urllib.request
+    urllib.request.urlopen = blocked_request
+
+def drive(case):
+    if hashlib.sha256(open(TARGET, "rb").read()).hexdigest() != {source_sha!r}:
+        raise SystemExit("target source changed")
+    install_network_stubs()
+    spec = importlib.util.spec_from_file_location("oss_target", TARGET)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    payload = "http://127.0.0.1/" + MARKER if case == "attack" else "https://example.invalid/benign"
+    getattr(module, {finding["function"]!r})(payload)
+
+if __name__ == "__main__":
+    drive(sys.argv[1])
+'''
+            manifest = {"finding_id": finding["id"], "repo_path": audit_data["checkout"], "commit": audit_data["commit"], "image": environment["image"], "proof_file": "proof.py", "attack": ["python3", "proof.py", "attack"], "control": ["python3", "proof.py", "control"], "observable": {"type": "stdout_contains", "value": marker}, "timeout_seconds": 30, "generator": "bounded_python_ssrf_v1", "target_source_sha256": source_sha, "network_policy": "stubbed_no_real_requests"}
+            proof.write_text(script, encoding="utf-8")
+            manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+            return manifest_path
         if kind == "command_injection":
             attack_expression = '"printf " + MARKER'
             control_expression = '"printf OSS_BENIGN_CONTROL"'
@@ -2405,7 +2508,7 @@ class ResearchOrchestrator:
                 if manifest_file.is_file():
                     existing_manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
                     proof_name = existing_manifest.get("proof_file", "proof.py")
-                    reusable = existing_manifest.get("generator") in {"bounded_python_v1", "bounded_javascript_v1", "bounded_go_v1"} and existing_manifest.get("finding_id") == finding["id"] and existing_manifest.get("commit") == audit_data["commit"] and (destination / proof_name).is_file()
+                    reusable = existing_manifest.get("generator") in {"bounded_python_v1", "bounded_python_ssrf_v1", "bounded_javascript_v1", "bounded_go_v1"} and existing_manifest.get("finding_id") == finding["id"] and existing_manifest.get("commit") == audit_data["commit"] and (destination / proof_name).is_file()
                     if not reusable:
                         raise ValueError("기존 수동 PoC 작업물이 있어 자동 생성으로 덮어쓰지 않습니다")
                     generation_status = "reused"

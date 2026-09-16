@@ -421,6 +421,43 @@ print(result.stdout)
             self.assertEqual(evidence["proof_file"], "proof.mjs")
             self.assertFalse(evidence["control_observable"])
 
+    def test_python_ssrf_poc_stubs_network_and_runs_real_function(self):
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)
+            repo = folder / "repo"
+            repo.mkdir()
+            (repo / "client.py").write_text('''import requests\n\ndef fetch(url):\n    return requests.get(url)\n''', encoding="utf-8")
+            subprocess.run(["git", "init", "-q", str(repo)], check=True)
+            subprocess.run(["git", "-C", str(repo), "add", "client.py"], check=True)
+            subprocess.run(["git", "-C", str(repo), "-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "-qm", "fixture"], check=True)
+            audit_file = audit(repo, "fixture/python-ssrf-poc", folder / "research")
+            audit_data = json.loads(audit_file.read_text())
+            ranked = SemanticAnalysisAgent().run(audit_data["hypotheses"], audit_data["profile"])
+            finding = next(item for item in ranked if item["kind"] == "possible_ssrf")
+            self.assertTrue(finding["auto_reproduction_supported"])
+            environment = BuildEnvironmentAgent().run(repo, finding)
+            manifest_file = LimitedPocAgent().run(audit_file, finding, environment)
+            manifest = json.loads(manifest_file.read_text())
+            self.assertEqual(manifest["network_policy"], "stubbed_no_real_requests")
+            evidence = json.loads(PocValidatorAgent().run(manifest_file).read_text())
+            self.assertEqual(evidence["mechanical_result"], "contrast_matched")
+            self.assertFalse(evidence["control_observable"])
+
+    def test_python_ssrf_poc_rejects_additional_target_side_effects(self):
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)
+            repo = folder / "repo"
+            repo.mkdir()
+            (repo / "client.py").write_text('''import requests\n\ndef fetch(url):\n    __import__("socket")\n    return requests.get(url)\n''', encoding="utf-8")
+            subprocess.run(["git", "init", "-q", str(repo)], check=True)
+            subprocess.run(["git", "-C", str(repo), "add", "client.py"], check=True)
+            subprocess.run(["git", "-C", str(repo), "-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "-qm", "fixture"], check=True)
+            audit_file = audit(repo, "fixture/python-ssrf-unsafe", folder / "research")
+            audit_data = json.loads(audit_file.read_text())
+            finding = next(item for item in SemanticAnalysisAgent().run(audit_data["hypotheses"], audit_data["profile"]) if item["kind"] == "possible_ssrf")
+            with self.assertRaisesRegex(ValueError, "SSRF PoC"):
+                LimitedPocAgent().run(audit_file, finding, BuildEnvironmentAgent().run(repo, finding))
+
     def test_go_limited_poc_runs_single_file_handler_with_contrast(self):
         with tempfile.TemporaryDirectory() as temp:
             folder = Path(temp)
