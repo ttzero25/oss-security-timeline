@@ -454,6 +454,22 @@ def home(report: dict, stats: dict, audits: list[dict], agents: list[dict]) -> s
     return page("Home", "home", body)
 
 
+def job_progress(job: dict) -> int:
+    try:
+        stored = int(job.get("progress", 0) or 0)
+    except (TypeError, ValueError):
+        stored = 0
+    if job.get("status") == "complete":
+        return 100
+    if job.get("status") == "failed":
+        return max(0, min(99, stored))
+    if job.get("progress") is not None:
+        return max(2, min(98, stored or 2))
+    step = str(job.get("step") or "")
+    milestones = (("PoC", 82), ("가설", 72), ("프로파일링", 52), ("복제", 45), ("전후 변경", 34), ("수집", 12), ("재시작", 8), ("대기", 4))
+    return next((progress for label, progress in milestones if label in step), 5)
+
+
 def lab(selected: str | None, report: dict | None, audits: list[dict], job: dict | None, error: str | None, comparisons: dict, fix_year: str = "", fix_month: str = "") -> str:
     value = esc("https://github.com/" + selected) if selected else ""
     capabilities = "".join(f"<span>{esc(label)}</span>" for label in ("명령·코드 실행", "SSRF · 네트워크 스텁", "SQL · DB 스텁", "경로 조작 · scratch", "pickle · stdout 전용", "템플릿 sink · 범위 표시", "C/C++ · ASan/UBSan"))
@@ -462,7 +478,9 @@ def lab(selected: str | None, report: dict | None, audits: list[dict], job: dict
     running = bool(job and job["status"] == "running")
     if job:
         state = "진행 중" if running else "완료" if job["status"] == "complete" else "실패"
-        notice += f'<div class="notice job-status {"running" if running else "complete" if job["status"] == "complete" else "failed"}"><b>{esc(job["repo"])} · {state}</b><span>{esc(job["step"] if running else job.get("error") or "수집과 코드 조사가 완료됐습니다.")}</span></div>'
+        progress = job_progress(job)
+        progress_bar = f'''<div class="liquid-progress" role="progressbar" aria-label="조사 진행률" aria-valuemin="0" aria-valuemax="100" aria-valuenow="{progress}" style="--progress:{progress}%"><div class="liquid-fill"></div><span>{progress}%</span></div>'''
+        notice += f'<div class="notice job-status {"running" if running else "complete" if job["status"] == "complete" else "failed"}"><div class="job-status-copy"><b>{esc(job["repo"])} · {state}</b><span>{esc(job["step"] if running else job.get("error") or "수집과 코드 조사가 완료됐습니다.")}</span></div>{progress_bar}</div>'
     details = ""
     if selected and report:
         repo_data = report["repositories"][0]
@@ -631,7 +649,7 @@ def serve(port: int, db_path: Path, research_root: Path, registry_path: Path) ->
     def run_job(repo: str) -> None:
         try:
             with lock:
-                jobs[repo]["step"] = "공개 릴리스·커밋·보안 공지 수집 중"
+                jobs[repo].update(step="공개 릴리스·커밋·보안 공지 수집 중", progress=12)
                 persist_jobs()
             store = Store(db_path)
             client = HttpClient(token=token)
@@ -640,22 +658,22 @@ def serve(port: int, db_path: Path, research_root: Path, registry_path: Path) ->
             finally:
                 store.db.close()
             with lock:
-                jobs[repo]["step"] = "공지 참조 커밋의 전후 변경 확인 중"
+                jobs[repo].update(step="공지 참조 커밋의 전후 변경 확인 중", progress=34)
                 persist_jobs()
             collect_reference_diffs(client, repo, result.advisories, db_path.parent / "fix-comparisons")
             with lock:
-                jobs[repo]["step"] = "최신 커밋 복제 및 저장소 프로파일링 중"
+                jobs[repo].update(step="최신 커밋 복제 및 저장소 프로파일링 중", progress=48)
                 persist_jobs()
             root, _ = checkout(repo, research_root.parent / "checkouts")
             with lock:
                 complete_scan = bool(jobs[repo].get("complete_scan"))
             audit_file = audit(root, repo, research_root, timeline_db=db_path, complete_scan=complete_scan)
             with lock:
-                jobs[repo]["step"] = "코드 가설 우선순위화 및 제한 PoC 대조 중"
+                jobs[repo].update(step="코드 가설 우선순위화 및 제한 PoC 대조 중", progress=76)
                 persist_jobs()
             ResearchOrchestrator().run(audit_file, max_candidates=3, timeline_db=db_path)
             with lock:
-                jobs[repo].update(status="complete", step="완료")
+                jobs[repo].update(status="complete", step="완료", progress=100)
                 persist_jobs()
         except (ApiError, ValueError, RuntimeError, OSError, KeyError) as exc:
             with lock:
@@ -688,12 +706,12 @@ def serve(port: int, db_path: Path, research_root: Path, registry_path: Path) ->
     def run_replay_job(repo: str) -> None:
         try:
             with lock:
-                jobs[repo]["step"] = "이월 후보 우선순위화 및 제한 PoC 대조 중"
+                jobs[repo].update(step="이월 후보 우선순위화 및 제한 PoC 대조 중", progress=55)
                 persist_jobs()
             audit_file = latest_audit(repo)
             ResearchOrchestrator().run(audit_file, max_candidates=3, timeline_db=db_path, resume=True)
             with lock:
-                jobs[repo].update(status="complete", step="이월 후보 검증 완료", error="")
+                jobs[repo].update(status="complete", step="이월 후보 검증 완료", error="", progress=100)
                 persist_jobs()
         except (ValueError, RuntimeError, OSError, KeyError) as exc:
             with lock:
@@ -703,7 +721,7 @@ def serve(port: int, db_path: Path, research_root: Path, registry_path: Path) ->
     def run_self_test(repo: str) -> None:
         try:
             with lock:
-                jobs[repo]["step"] = "로컬 fixture 체크아웃 준비 중"
+                jobs[repo].update(step="로컬 fixture 체크아웃 준비 중", progress=18)
                 persist_jobs()
             checkout_parent = research_root.parent / "checkouts"
             checkout_parent.mkdir(parents=True, exist_ok=True)
@@ -721,12 +739,12 @@ def serve(port: int, db_path: Path, research_root: Path, registry_path: Path) ->
             finally:
                 store.db.close()
             with lock:
-                jobs[repo]["step"] = "fixture 가설·PoC·제보 초안 검증 중"
+                jobs[repo].update(step="fixture 가설·PoC·제보 초안 검증 중", progress=62)
                 persist_jobs()
             audit_file = audit(root, repo, research_root, timeline_db=db_path)
             ResearchOrchestrator().run(audit_file, max_candidates=3, timeline_db=db_path)
             with lock:
-                jobs[repo].update(status="complete", step="self-test 완료", error="")
+                jobs[repo].update(status="complete", step="self-test 완료", error="", progress=100)
                 persist_jobs()
         except (ValueError, RuntimeError, OSError, KeyError, subprocess.SubprocessError) as exc:
             with lock:
@@ -856,7 +874,7 @@ def serve(port: int, db_path: Path, research_root: Path, registry_path: Path) ->
                     return
                 action = "replay" if action_path == "/lab/replay" else "self_test" if action_path == "/lab/self-test" else "research"
                 step = "이월 후보 검증 대기 중" if action == "replay" else "self-test 대기 중" if action == "self_test" else "조사 대기 중"
-                jobs[repo] = {"repo": repo, "status": "running", "step": step, "started_at": datetime.now(timezone.utc).isoformat(), "attempts": 1, "max_attempts": 3, "resume_on_restart": True, "action": action, "complete_scan": complete_scan}
+                jobs[repo] = {"repo": repo, "status": "running", "step": step, "progress": 4, "started_at": datetime.now(timezone.utc).isoformat(), "attempts": 1, "max_attempts": 3, "resume_on_restart": True, "action": action, "complete_scan": complete_scan}
                 persist_jobs()
             target = run_replay_job if action_path == "/lab/replay" else run_self_test if action_path == "/lab/self-test" else run_job
             threading.Thread(target=target, args=(repo,), daemon=True).start()

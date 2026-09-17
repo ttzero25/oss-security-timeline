@@ -77,8 +77,11 @@ class DashboardTests(unittest.TestCase):
             self.assertIn("실제 프레임워크 실행 아님", rendered)
 
     def test_running_lab_uses_neutral_job_status_class(self):
-        rendered = lab(None, None, [], {"repo": "example/demo", "status": "running", "step": "코드 조사 중"}, None, {"comparisons": [], "truncated": False})
+        rendered = lab(None, None, [], {"repo": "example/demo", "status": "running", "step": "코드 조사 중", "progress": 76}, None, {"comparisons": [], "truncated": False})
         self.assertIn('class="notice job-status running"', rendered)
+        self.assertIn('role="progressbar"', rendered)
+        self.assertIn('aria-valuenow="76"', rendered)
+        self.assertIn('style="--progress:76%"', rendered)
         self.assertIn("SSRF · 네트워크 스텁", rendered)
         self.assertIn("경로 조작 · scratch", rendered)
         self.assertIn('name="complete_scan"', rendered)
