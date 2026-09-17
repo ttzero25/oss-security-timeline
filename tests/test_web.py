@@ -47,6 +47,8 @@ class DashboardTests(unittest.TestCase):
             self.assertIn('value="05" selected', rendered)
             self.assertIn('<details class="panel diff-card">', rendered)
             self.assertIn('<details class="diff-file">', rendered)
+            self.assertIn('href="#fix-comparison">Fix 전후 <b>1</b></a>', rendered)
+            self.assertIn('id="fix-comparison"', rendered)
 
     def test_lab_shows_multihop_trace_and_evidence_gate(self):
         with tempfile.TemporaryDirectory() as temp:
