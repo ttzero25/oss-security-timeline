@@ -90,6 +90,24 @@
             loading="lazy"
           ></iframe>
         </div>
+        <div class="agent-role-heading">
+          <div><span class="eyebrow">AGENT DIRECTORY</span><h3>에이전트별 역할</h3></div>
+          <p>지도에는 관계를, 아래 박스에는 각 역할의 책임을 분리해 표시했습니다.</p>
+        </div>
+        <div class="agent-role-grid" aria-label="12개 에이전트 역할 설명">
+          <article><span>01 · 수집</span><h4>패키지 식별</h4><code>InventoryAgent</code><p>매니페스트를 읽어 배포 패키지와 생태계를 식별합니다.</p></article>
+          <article><span>02 · 수집</span><h4>변경 이력 수집</h4><code>ChangeAgent</code><p>릴리스와 커밋을 시간순으로 수집하고 변경 범위를 기록합니다.</p></article>
+          <article><span>03 · 수집</span><h4>보안 공지 수집</h4><code>AdvisoryAgent</code><p>저장소·GitHub·OSV의 CVE와 GHSA 공지를 모읍니다.</p></article>
+          <article><span>04 · 선별</span><h4>보안 후보 선별</h4><code>CandidateAgent</code><p>공개 변경에서 심층 검토할 보안 관련 후보를 추립니다.</p></article>
+          <article><span>05 · 분석</span><h4>저장소 프로파일</h4><code>RepositoryProfilerAgent</code><p>언어·패키지·잠금파일·외부 진입점과 미지원 범위를 정리합니다.</p></article>
+          <article><span>06 · 분석</span><h4>코드 가설 생성</h4><code>SourceScanAgent</code><p>외부 입력에서 위험 동작까지 이어지는 코드 경로 가설을 찾습니다.</p></article>
+          <article><span>07 · 게이트</span><h4>도달성 확인</h4><code>ReachabilityGateAgent</code><p>기본 외부 진입점이 후보 코드 경로에 실제로 닿는지 확인합니다.</p></article>
+          <article><span>08 · 조율</span><h4>심층조사 조율</h4><code>ResearchOrchestrator</code><p>후보 우선순위를 정하고 허용된 범위의 격리 재현을 조정합니다.</p></article>
+          <article><span>09 · 검증</span><h4>PoC 대조</h4><code>PocValidatorAgent</code><p>정상 입력과 공격 입력을 실행해 관측 결과의 차이를 비교합니다.</p></article>
+          <article><span>10 · 검토</span><h4>기존 공지 중복 조사</h4><code>DuplicateReviewAgent</code><p>동일 패키지 공지와 과거 보안 변경을 비교해 신규성을 점검합니다.</p></article>
+          <article><span>11 · 판정</span><h4>근거 게이트</h4><code>EvidenceGateAgent</code><p>도달성·기본 설정·공격자 통제·영향·신규성을 종합 평가합니다.</p></article>
+          <article><span>12 · 초안</span><h4>제보 자료 생성</h4><code>DisclosureAgent</code><p>검증된 근거로 GHSA·CVE 비공개 제보 초안을 작성합니다.</p></article>
+        </div>
         <div class="agent-note"><b>읽는 법</b><span>ChangeAgent와 AdvisoryAgent는 병렬로 공개 근거를 모읍니다. 이후 후보는 코드 의미 분석, 도달성, 제한 PoC, 중복 조사와 근거 게이트를 차례로 통과합니다. DisclosureAgent는 초안만 만들며 외부 제출은 사람이 직접 수행합니다.</span></div>
         <p class="agent-credit">이 구성도는 <a href="https://github.com/tt-a1i/archify" target="_blank" rel="noopener">Archify</a>로 생성했으며 밝은/어두운 테마, 검색, 경로 추적과 내보내기를 지원합니다.</p>
       </section>
