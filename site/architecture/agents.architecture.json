@@ -1,0 +1,60 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "OSS Security Timeline 멀티에이전트 구성",
+    "quality_profile": "showcase",
+    "viewBox": [1320, 690]
+  },
+  "components": [
+    { "id": "inventory", "type": "backend", "label": "InventoryAgent", "pos": [45, 150], "size": [150, 58] },
+    { "id": "change", "type": "cloud", "label": "ChangeAgent", "pos": [260, 150], "size": [150, 58] },
+    { "id": "candidate", "type": "security", "label": "CandidateAgent", "pos": [475, 150], "size": [150, 58] },
+    { "id": "profiler", "type": "backend", "label": "RepositoryProfilerAgent", "pos": [690, 150], "size": [174, 58] },
+    { "id": "source_scan", "type": "security", "label": "SourceScanAgent", "pos": [905, 150], "size": [150, 58] },
+    { "id": "reachability", "type": "security", "label": "ReachabilityGateAgent", "pos": [1110, 150], "size": [174, 58] },
+
+    { "id": "advisory", "type": "security", "label": "AdvisoryAgent", "pos": [260, 350], "size": [150, 58] },
+    { "id": "disclosure", "type": "external", "label": "DisclosureAgent", "pos": [475, 480], "size": [150, 58] },
+    { "id": "evidence_gate", "type": "security", "label": "EvidenceGateAgent", "pos": [690, 480], "size": [160, 58] },
+    { "id": "duplicate_review", "type": "database", "label": "DuplicateReviewAgent", "pos": [905, 480], "size": [174, 58] },
+    { "id": "poc_validator", "type": "security", "label": "PocValidatorAgent", "pos": [1110, 480], "size": [160, 58] },
+    { "id": "orchestrator", "type": "messagebus", "label": "ResearchOrchestrator", "pos": [1110, 350], "size": [174, 58] }
+  ],
+  "boundaries": [
+    { "kind": "region", "label": "코드 의미 분석", "wraps": ["profiler", "source_scan", "reachability"], "pad": 18 },
+    { "kind": "security-group", "label": "격리 검증 · 근거 판정 · 제보 초안", "wraps": ["orchestrator", "poc_validator", "duplicate_review", "evidence_gate", "disclosure"], "pad": 18 }
+  ],
+  "connections": [
+    { "id": "inventory_change", "from": "inventory", "to": "change", "label": "인벤토리", "variant": "default" },
+    { "id": "inventory_advisory", "from": "inventory", "to": "advisory", "label": "패키지 좌표", "variant": "security" },
+    { "id": "change_candidate", "from": "change", "to": "candidate", "label": "변경 이력", "variant": "default" },
+    { "id": "advisory_candidate", "from": "advisory", "to": "candidate", "label": "CVE · GHSA · OSV", "variant": "security" },
+    { "id": "candidate_profiler", "from": "candidate", "to": "profiler", "label": "후보", "variant": "emphasis" },
+    { "id": "profiler_scan", "from": "profiler", "to": "source_scan", "label": "범위", "variant": "default" },
+    { "id": "scan_reachability", "from": "source_scan", "to": "reachability", "label": "가설", "variant": "security" },
+    { "id": "reachability_orchestrator", "from": "reachability", "to": "orchestrator", "label": "도달성", "variant": "emphasis", "labelAt": [1197, 222] },
+    { "id": "orchestrator_poc", "from": "orchestrator", "to": "poc_validator", "label": "제한된 PoC", "variant": "security", "fromSide": "bottom", "toSide": "top" },
+    { "id": "poc_duplicate", "from": "poc_validator", "to": "duplicate_review", "label": "재현", "variant": "emphasis" },
+    { "id": "duplicate_evidence", "from": "duplicate_review", "to": "evidence_gate", "label": "신규성", "variant": "default" },
+    { "id": "evidence_disclosure", "from": "evidence_gate", "to": "disclosure", "label": "검증 성공", "variant": "security" }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "타임라인 수집",
+      "items": [
+        "업데이트와 공개 취약점 공지를 시간축 데이터로 축적",
+        "ChangeAgent와 AdvisoryAgent만 같은 입력에서 병렬 수집"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "심층조사와 공개 원칙",
+      "items": [
+        "코드 가설은 격리된 정상/공격 대조와 중복 조사를 통과",
+        "GHSA/CVE 초안까지만 생성하며 외부 제출은 사람이 최종 검토"
+      ]
+    }
+  ]
+}
