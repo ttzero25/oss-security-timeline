@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow">
+  <meta name="description" content="OSS Security Timeline 프로젝트 공유 대시보드">
+  <title>OSS Security Timeline</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="shell">
+    <header class="topbar">
+      <a class="brand" href="#home"><span>◈</span> OSS Security Timeline</a>
+      <nav aria-label="페이지 섹션">
+        <a href="#home">Home</a>
+        <a href="#features">기능</a>
+        <a href="#workflow">조사 흐름</a>
+        <a href="#safety">안전 경계</a>
+        <a href="#start">빠른 시작</a>
+      </nav>
+      <button id="theme-toggle" type="button" aria-label="낮과 밤 밝기 전환">☾</button>
+      <span class="badge">PUBLIC PREVIEW</span>
+    </header>
+
+    <main id="home">
+      <section class="hero">
+        <span class="eyebrow">OPEN SOURCE SECURITY INTELLIGENCE</span>
+        <h1>공개 변경부터 검증 가능한<br><em>보안 가설</em>까지.</h1>
+        <p>GitHub 오픈소스 저장소의 업데이트와 CVE·GHSA·OSV 공지를 시간순으로 추적하고, 코드 가설을 제한된 PoC로 검증해 사람이 검토할 제보 초안까지 연결합니다.</p>
+        <div class="hero-actions">
+          <a class="button" href="https://github.com/ttzero25/oss-security-timeline">GitHub 저장소 ↗</a>
+          <a class="secondary" href="#start">로컬 실행 보기</a>
+        </div>
+      </section>
+
+      <section aria-labelledby="snapshot-title">
+        <div class="section-heading">
+          <div><span class="eyebrow">LOCAL SNAPSHOT</span><h2 id="snapshot-title">현재 조사 스냅샷</h2></div>
+          <p>2026-09-17 로컬 데이터의 공개 집계 · 자동 갱신 아님</p>
+        </div>
+        <div class="metrics">
+          <article><span>추적 저장소</span><strong>10</strong><small>수집된 공개 OSS</small></article>
+          <article><span>고유 보안 공지</span><strong>1,459</strong><small>CVE·GHSA 별칭 통합</small></article>
+          <article><span>변경 이벤트</span><strong>62,890</strong><small>릴리스·커밋 기록</small></article>
+          <article><span>코드 검토 후보</span><strong>67</strong><small>취약점 확정 아님</small></article>
+          <article><span>PoC 대조 성공</span><strong>2</strong><small>번들 self-test 포함</small></article>
+        </div>
+      </section>
+
+      <section id="features" aria-labelledby="features-title">
+        <div class="section-heading">
+          <div><span class="eyebrow">CAPABILITIES</span><h2 id="features-title">하나의 타임라인, 두 갈래 조사</h2></div>
+        </div>
+        <div class="cards">
+          <article><b>01</b><h3>공개 데이터 추적</h3><p>릴리스, 커밋, 저장소·패키지 보안 공지를 모으고 CVE/GHSA 별칭과 관측 시각을 정규화합니다.</p></article>
+          <article><b>02</b><h3>Fix 전후 비교</h3><p>영향·패치 버전과 공지가 참조한 커밋의 삭제·추가 코드를 파일별 드롭다운으로 비교합니다.</p></article>
+          <article><b>03</b><h3>코드 가설 조사</h3><p>외부 입력에서 위험 동작까지의 경로를 찾고 언어·프레임워크·미지원 범위를 함께 기록합니다.</p></article>
+          <article><b>04</b><h3>제한 PoC 대조</h3><p>허용된 후보만 정상/공격 입력으로 대조하고 기존 공지 중복과 다섯 근거 게이트를 확인합니다.</p></article>
+          <article><b>05</b><h3>관계망과 정리</h3><p>저장소, 패키지, 공지, CVE, CWE, fix 커밋과 코드 후보의 연결을 한 화면에서 탐색합니다.</p></article>
+          <article><b>06</b><h3>사람 중심 제보</h3><p>검증된 결과만 GHSA/CVE 비공개 초안으로 만들며 외부 제출과 식별자 요청은 자동화하지 않습니다.</p></article>
+        </div>
+      </section>
+
+      <section id="workflow" class="panel" aria-labelledby="workflow-title">
+        <span class="eyebrow">RESEARCH ORCHESTRATOR</span>
+        <h2 id="workflow-title">코드 조사 흐름</h2>
+        <div class="flow" aria-label="조사 처리 순서">
+          <span>공지 동기화</span><i>→</i><span>저장소 프로파일</span><i>→</i><span>정적 가설</span><i>→</i><span>도달성</span><i>→</i><span>제한 PoC</span><i>→</i><span>중복 검토</span><i>→</i><span>근거 게이트</span><i>→</i><span>제보 초안</span>
+        </div>
+        <p>지원되지 않거나 근거가 부족한 후보는 억지로 실행하거나 보고서로 승격하지 않고 차단 사유와 함께 검토 대상으로 남깁니다.</p>
+      </section>
+
+      <section id="safety" aria-labelledby="safety-title">
+        <div class="section-heading">
+          <div><span class="eyebrow">SAFETY BOUNDARY</span><h2 id="safety-title">자동화가 넘지 않는 선</h2></div>
+        </div>
+        <div class="split">
+          <div class="panel">
+            <h3>실행 제한</h3>
+            <ul>
+              <li>시간·CPU·출력·파일 디스크립터 제한</li>
+              <li>실제 네트워크와 DB 대신 메모리 스텁 사용</li>
+              <li>임시 scratch 밖의 쓰기 제한</li>
+              <li>누락 의존성 자동 설치 금지</li>
+            </ul>
+          </div>
+          <div class="panel">
+            <h3>결과 제한</h3>
+            <ul>
+              <li>후보 0건을 안전 판정으로 해석하지 않음</li>
+              <li>PoC 성공을 모든 배포 환경의 영향으로 과장하지 않음</li>
+              <li>비공개 초안은 사람이 다시 검토</li>
+              <li>외부 제보와 CVE/GHSA 요청은 수동 수행</li>
+            </ul>
+          </div>
+        </div>
+      </section>
+
+      <section id="start" class="panel start" aria-labelledby="start-title">
+        <span class="eyebrow">QUICK START</span>
+        <h2 id="start-title">로컬 대시보드 실행</h2>
+        <pre><code>git clone https://github.com/ttzero25/oss-security-timeline.git
+cd oss-security-timeline
+python3 tools/web.py --port 8765</code></pre>
+        <p>브라우저에서 <code>http://127.0.0.1:8765/</code>을 열고 실험실에 공개 GitHub 저장소 링크를 입력합니다. 이 공개 프리뷰는 소개용 정적 페이지이며 조사 실행·PoC·비공개 리포트는 포함하지 않습니다.</p>
+      </section>
+    </main>
+
+    <footer>정적 공개 프리뷰 · 코드 후보는 검증된 취약점이 아닙니다.</footer>
+  </div>
+  <script src="app.js"></script>
+</body>
+</html>
