@@ -224,6 +224,11 @@ class DashboardTests(unittest.TestCase):
             self.assertIn('<dt>타겟</dt><dd><a href="https://github.com/example/demo" target="_blank" rel="noopener noreferrer">example/demo</a></dd>', rendered)
             self.assertIn("<dt>분석 커밋</dt><dd><code>aaaaaaaaaaaa</code></dd>", rendered)
 
+            rendered_with_targets = reports_page(reports, audits=[{"repo": "coturn/coturn", "commit": "b" * 40, "generated_at": "2026-09-17T00:00:00Z", "hypotheses": [], "orchestration": {"results": []}}])
+            self.assertIn("조사 타겟 현황", rendered_with_targets)
+            self.assertIn('href="https://github.com/coturn/coturn"', rendered_with_targets)
+            self.assertIn("검토 후보 0건 · 제보 초안 없음", rendered_with_targets)
+
 
 if __name__ == "__main__":
     unittest.main()

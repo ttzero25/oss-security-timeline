@@ -361,11 +361,27 @@ def graph_page(repositories: list[str], selected: str | None = None) -> str:
     return page("관계망", "graph", body)
 
 
-def reports_page(reports: list[dict], selected_key: str | None = None, document: str = "ghsa") -> str:
+def reports_page(reports: list[dict], selected_key: str | None = None, document: str = "ghsa", audits: list[dict] | None = None) -> str:
     ready = sum(item["drafts_ready"] for item in reports)
     verified = sum(item["verified"] for item in reports)
     submitted = sum(item.get("submission", {}).get("status") in {"submitted", "accepted"} for item in reports)
     selected = next((item for item in reports if item["key"] == selected_key), None)
+    latest_targets: dict[str, dict] = {}
+    for audit_item in audits or []:
+        repo = str(audit_item.get("repo") or "")
+        if not repo or (repo in latest_targets and str(latest_targets[repo].get("generated_at") or "") >= str(audit_item.get("generated_at") or "")):
+            continue
+        latest_targets[repo] = audit_item
+    target_rows = ""
+    for repo, audit_item in sorted(latest_targets.items()):
+        orchestration = audit_item.get("orchestration") or {}
+        results = orchestration.get("results") or []
+        drafts = sum(result.get("status") == "draft_ready" for result in results)
+        hypotheses = len(audit_item.get("hypotheses") or [])
+        status = f"제보 초안 {drafts}건" if drafts else f"검토 후보 {hypotheses}건 · 제보 초안 없음"
+        target = esc(repo) if repo.startswith("fixture/") else f'<a href="https://github.com/{esc(repo)}" target="_blank" rel="noopener noreferrer">{esc(repo)}</a>'
+        target_rows += f'<tr><td>{target}</td><td><code>{esc(str(audit_item.get("commit") or "")[:12])}</code></td><td>{esc(status)}</td></tr>'
+    target_section = f'''<section><div class="section-heading"><div><span class="eyebrow">RESEARCH TARGETS</span><h2>조사 타겟 현황</h2></div><p>제보 초안이 없는 저장소도 표시</p></div>{table(["타겟", "분석 커밋", "조사 결과"], target_rows) if target_rows else empty("아직 조사한 타겟이 없습니다.")}</section>'''
     cards = ""
     for item in reports:
         submission = item.get("submission", {})
@@ -393,7 +409,7 @@ def reports_page(reports: list[dict], selected_key: str | None = None, document:
         content = selected["ghsa_text"] if document == "ghsa" else selected["cve_text"]
         if selected["drafts_ready"] and content:
             viewer = f'''<section class="report-viewer"><div class="section-heading"><div><span class="eyebrow">PRIVATE DRAFT</span><h2>{label}</h2></div><a href="/reports">닫기</a></div><div class="notice subdued">로컬 CLI가 생성한 비공개 초안입니다. 자동 제출되지 않았으며 공개 전 사람의 검토가 필요합니다.</div><pre>{esc(content)}</pre></section>'''
-    body = f'''<section class="page-head"><span class="eyebrow">CLI ARTIFACTS</span><h1>검증 리포트</h1><p>자원 제한 CLI 검증 결과와 비공개 GHSA/CVE 제보 초안을 읽기 전용으로 확인합니다.</p></section><section><div class="metrics compact">{metric("CLI 산출물", len(reports), "PoC 실행 기록 포함")}{metric("PoC 대조 성공", verified, "동일 커밋·후보 근거")}{metric("제보 초안", ready, "GHSA와 CVE 문서 쌍")}{metric("사람이 제출", submitted, "CLI에 기록된 상태")}</div></section>{viewer}<section><div class="section-heading"><div><span class="eyebrow">LOCAL ONLY</span><h2>리포트 목록</h2></div><p>새로고침할 때 data/research를 다시 읽음</p></div><div class="notice subdued">웹은 이 산출물을 실행하거나 수정하거나 외부로 제출하지 않습니다. 제출 상태도 사람이 수행한 결과를 CLI로 기록한 값일 뿐입니다.</div><div class="report-grid">{cards}</div>{empty("아직 CLI PoC 검증 또는 제보 초안 산출물이 없습니다.") if not reports else ""}</section>'''
+    body = f'''<section class="page-head"><span class="eyebrow">CLI ARTIFACTS</span><h1>검증 리포트</h1><p>자원 제한 CLI 검증 결과와 비공개 GHSA/CVE 제보 초안을 읽기 전용으로 확인합니다.</p></section><section><div class="metrics compact">{metric("CLI 산출물", len(reports), "PoC 실행 기록 포함")}{metric("PoC 대조 성공", verified, "동일 커밋·후보 근거")}{metric("제보 초안", ready, "GHSA와 CVE 문서 쌍")}{metric("사람이 제출", submitted, "CLI에 기록된 상태")}</div></section>{target_section}{viewer}<section><div class="section-heading"><div><span class="eyebrow">LOCAL ONLY</span><h2>리포트 목록</h2></div><p>새로고침할 때 data/research를 다시 읽음</p></div><div class="notice subdued">웹은 이 산출물을 실행하거나 수정하거나 외부로 제출하지 않습니다. 제출 상태도 사람이 수행한 결과를 CLI로 기록한 값일 뿐입니다.</div><div class="report-grid">{cards}</div>{empty("아직 CLI PoC 검증 또는 제보 초안 산출물이 없습니다.") if not reports else ""}</section>'''
     return page("검증 리포트", "reports", body)
 
 
@@ -791,7 +807,7 @@ def serve(port: int, db_path: Path, research_root: Path, registry_path: Path) ->
                     document = query.get("doc", ["ghsa"])[0]
                     if document not in {"ghsa", "cve"}:
                         document = "ghsa"
-                    self.respond(reports_page(disclosure_index(research_root), query.get("report", [None])[0], document))
+                    self.respond(reports_page(disclosure_index(research_root), query.get("report", [None])[0], document, audits))
                 else:
                     with lock:
                         job = jobs.get(selected, {}).copy() if selected else None
