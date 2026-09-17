@@ -218,6 +218,10 @@ class DashboardTests(unittest.TestCase):
             self.assertIn("Private &lt;candidate&gt;", rendered)
             self.assertNotIn("Private <candidate>", rendered)
             self.assertIn('href="/reports"', rendered)
+            target = rendered.index("<dt>타겟</dt>")
+            candidate = rendered.index("<dt>후보 ID</dt>")
+            self.assertLess(target, candidate)
+            self.assertIn("example/demo @ <code>aaaaaaaaaaaa</code>", rendered)
 
 
 if __name__ == "__main__":
