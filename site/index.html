@@ -16,6 +16,7 @@
         <a href="#home">Home</a>
         <a href="#features">기능</a>
         <a href="#workflow">조사 흐름</a>
+        <a href="#agents">에이전트</a>
         <a href="#safety">안전 경계</a>
         <a href="#start">빠른 시작</a>
       </nav>
@@ -69,6 +70,38 @@
           <span>공지 동기화</span><i>→</i><span>저장소 프로파일</span><i>→</i><span>정적 가설</span><i>→</i><span>도달성</span><i>→</i><span>제한 PoC</span><i>→</i><span>중복 검토</span><i>→</i><span>근거 게이트</span><i>→</i><span>제보 초안</span>
         </div>
         <p>지원되지 않거나 근거가 부족한 후보는 억지로 실행하거나 보고서로 승격하지 않고 차단 사유와 함께 검토 대상으로 남깁니다.</p>
+      </section>
+
+      <section id="agents" aria-labelledby="agents-title">
+        <div class="section-heading">
+          <div><span class="eyebrow">MULTI-AGENT MAP</span><h2 id="agents-title">12개 역할로 분리된 조사 파이프라인</h2></div>
+          <p>수집 4개 · 코드 조사와 검증 8개</p>
+        </div>
+        <div class="agent-lanes">
+          <article class="agent-lane">
+            <div class="lane-head"><span>PUBLIC TIMELINE</span><h3>공개 데이터 수집</h3><p>변경과 공지는 병렬 수집하고 결과를 하나의 타임라인으로 합칩니다.</p></div>
+            <ol class="agent-list">
+              <li><b>InventoryAgent</b><span>매니페스트에서 배포 패키지와 생태계를 식별</span></li>
+              <li><b>ChangeAgent</b><span>릴리스와 커밋 변경 기록 수집</span></li>
+              <li><b>AdvisoryAgent</b><span>저장소·GitHub·OSV 보안 공지 수집</span></li>
+              <li><b>CandidateAgent</b><span>공개 보안 변경 중 사람의 검토가 필요한 신호 선별</span></li>
+            </ol>
+          </article>
+          <article class="agent-lane research-lane">
+            <div class="lane-head"><span>BOUNDED RESEARCH</span><h3>코드 조사·검증</h3><p>앞 단계의 근거를 다음 단계가 소비하는 순차 게이트입니다.</p></div>
+            <ol class="agent-list">
+              <li><b>RepositoryProfilerAgent</b><span>언어·패키지·lockfile·외부 엔트리포인트와 조사 범위 기록</span></li>
+              <li><b>SourceScanAgent</b><span>외부 입력에서 위험 동작까지의 코드 가설 생성</span></li>
+              <li><b>ReachabilityGateAgent</b><span>기본 외부 진입점이 후보 경로에 도달하는지 확인</span></li>
+              <li><b>ResearchOrchestrator</b><span>후보 우선순위와 제한된 재현 실행을 조정</span></li>
+              <li><b>PocValidatorAgent</b><span>정상·공격 입력의 관측 결과를 기계적으로 대조</span></li>
+              <li><b>DuplicateReviewAgent</b><span>기존 공지·동일 패키지·과거 보안 변경과 중복 검토</span></li>
+              <li><b>EvidenceGateAgent</b><span>도달성·기본 설정·공격자 통제·영향·신규성 평가</span></li>
+              <li><b>DisclosureAgent</b><span>근거를 통과한 결과의 GHSA/CVE 비공개 초안 생성</span></li>
+            </ol>
+          </article>
+        </div>
+        <div class="agent-note"><b>실행 방식</b><span>ChangeAgent와 AdvisoryAgent만 병렬로 동작합니다. 코드 조사 단계는 근거가 섞이거나 건너뛰지 않도록 순차 실행하며, 외부 제보는 어느 에이전트도 수행하지 않습니다.</span></div>
       </section>
 
       <section id="safety" aria-labelledby="safety-title">
