@@ -7,6 +7,7 @@
   <meta name="description" content="OSS Security Timeline 프로젝트 공유 대시보드">
   <title>OSS Security Timeline</title>
   <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="agents.css">
 </head>
 <body>
   <div class="shell">
@@ -77,31 +78,47 @@
           <div><span class="eyebrow">MULTI-AGENT MAP</span><h2 id="agents-title">12개 역할로 분리된 조사 파이프라인</h2></div>
           <p>수집 4개 · 코드 조사와 검증 8개</p>
         </div>
-        <div class="agent-lanes">
-          <article class="agent-lane">
-            <div class="lane-head"><span>PUBLIC TIMELINE</span><h3>공개 데이터 수집</h3><p>변경과 공지는 병렬 수집하고 결과를 하나의 타임라인으로 합칩니다.</p></div>
-            <ol class="agent-list">
-              <li><b>InventoryAgent</b><span>매니페스트에서 배포 패키지와 생태계를 식별</span></li>
-              <li><b>ChangeAgent</b><span>릴리스와 커밋 변경 기록 수집</span></li>
-              <li><b>AdvisoryAgent</b><span>저장소·GitHub·OSV 보안 공지 수집</span></li>
-              <li><b>CandidateAgent</b><span>공개 보안 변경 중 사람의 검토가 필요한 신호 선별</span></li>
-            </ol>
+        <div class="agent-overview" aria-label="멀티에이전트 4단계">
+          <span><b>1</b> 수집 <small>4 agents</small></span><i>→</i>
+          <span><b>2</b> 분석 <small>3 agents</small></span><i>→</i>
+          <span><b>3</b> 검증 <small>3 agents</small></span><i>→</i>
+          <span><b>4</b> 판정·초안 <small>2 agents</small></span>
+        </div>
+        <div class="agent-phases">
+          <article class="agent-phase">
+            <header><span class="phase-number">01</span><div><h3>공개 데이터 수집</h3><p>저장소의 공개 정보와 보안 신호를 한 시간축으로 모읍니다.</p></div><em>변경·공지 병렬</em></header>
+            <div class="agent-cards four">
+              <div><h4>패키지 식별</h4><code>InventoryAgent</code><p>매니페스트에서 배포 패키지와 생태계를 찾습니다.</p></div>
+              <div><h4>변경 수집</h4><code>ChangeAgent</code><p>릴리스와 커밋 기록을 수집합니다.</p></div>
+              <div><h4>공지 수집</h4><code>AdvisoryAgent</code><p>GitHub·OSV 보안 공지를 수집합니다.</p></div>
+              <div><h4>변경 신호 선별</h4><code>CandidateAgent</code><p>검토할 공개 보안 변경을 추립니다.</p></div>
+            </div>
           </article>
-          <article class="agent-lane research-lane">
-            <div class="lane-head"><span>BOUNDED RESEARCH</span><h3>코드 조사·검증</h3><p>앞 단계의 근거를 다음 단계가 소비하는 순차 게이트입니다.</p></div>
-            <ol class="agent-list">
-              <li><b>RepositoryProfilerAgent</b><span>언어·패키지·lockfile·외부 엔트리포인트와 조사 범위 기록</span></li>
-              <li><b>SourceScanAgent</b><span>외부 입력에서 위험 동작까지의 코드 가설 생성</span></li>
-              <li><b>ReachabilityGateAgent</b><span>기본 외부 진입점이 후보 경로에 도달하는지 확인</span></li>
-              <li><b>ResearchOrchestrator</b><span>후보 우선순위와 제한된 재현 실행을 조정</span></li>
-              <li><b>PocValidatorAgent</b><span>정상·공격 입력의 관측 결과를 기계적으로 대조</span></li>
-              <li><b>DuplicateReviewAgent</b><span>기존 공지·동일 패키지·과거 보안 변경과 중복 검토</span></li>
-              <li><b>EvidenceGateAgent</b><span>도달성·기본 설정·공격자 통제·영향·신규성 평가</span></li>
-              <li><b>DisclosureAgent</b><span>근거를 통과한 결과의 GHSA/CVE 비공개 초안 생성</span></li>
-            </ol>
+          <article class="agent-phase">
+            <header><span class="phase-number">02</span><div><h3>코드 분석</h3><p>무엇을 얼마나 살폈는지 기록하고 외부 입력의 실제 경로를 좁힙니다.</p></div><em>순차 게이트</em></header>
+            <div class="agent-cards">
+              <div><h4>범위 프로파일</h4><code>RepositoryProfilerAgent</code><p>언어·lockfile·엔트리포인트와 미지원 범위를 기록합니다.</p></div>
+              <div><h4>코드 가설 생성</h4><code>SourceScanAgent</code><p>외부 입력에서 위험 동작까지의 후보 경로를 찾습니다.</p></div>
+              <div><h4>도달성 확인</h4><code>ReachabilityGateAgent</code><p>기본 외부 진입점에서 후보 경로로 연결되는지 확인합니다.</p></div>
+            </div>
+          </article>
+          <article class="agent-phase">
+            <header><span class="phase-number">03</span><div><h3>제한 검증</h3><p>가능성 높은 후보만 안전한 정상·공격 대조와 중복 검토로 보냅니다.</p></div><em>지원 후보만 실행</em></header>
+            <div class="agent-cards">
+              <div><h4>조사 조율</h4><code>ResearchOrchestrator</code><p>후보 우선순위와 허용된 제한 재현을 조정합니다.</p></div>
+              <div><h4>PoC 대조</h4><code>PocValidatorAgent</code><p>정상 입력과 공격 입력의 관측 결과를 비교합니다.</p></div>
+              <div><h4>중복 검토</h4><code>DuplicateReviewAgent</code><p>기존 공지·동일 패키지·과거 보안 변경을 대조합니다.</p></div>
+            </div>
+          </article>
+          <article class="agent-phase">
+            <header><span class="phase-number">04</span><div><h3>근거 판정과 초안</h3><p>기계적 재현만으로 확정하지 않고 다섯 근거를 종합합니다.</p></div><em>사람 검토 필수</em></header>
+            <div class="agent-cards two">
+              <div><h4>근거 게이트</h4><code>EvidenceGateAgent</code><p>도달성·기본 설정·공격자 통제·영향·신규성을 평가합니다.</p></div>
+              <div><h4>제보 초안</h4><code>DisclosureAgent</code><p>통과한 결과만 GHSA/CVE 비공개 초안으로 정리합니다.</p></div>
+            </div>
           </article>
         </div>
-        <div class="agent-note"><b>실행 방식</b><span>ChangeAgent와 AdvisoryAgent만 병렬로 동작합니다. 코드 조사 단계는 근거가 섞이거나 건너뛰지 않도록 순차 실행하며, 외부 제보는 어느 에이전트도 수행하지 않습니다.</span></div>
+        <div class="agent-note"><b>중요</b><span>에이전트는 외부 제보를 수행하지 않습니다. 초안은 사람이 코드와 재현 근거를 다시 검토한 뒤 직접 제출합니다.</span></div>
       </section>
 
       <section id="safety" aria-labelledby="safety-title">
