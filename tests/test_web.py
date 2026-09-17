@@ -221,7 +221,7 @@ class DashboardTests(unittest.TestCase):
             target = rendered.index("<dt>타겟</dt>")
             candidate = rendered.index("<dt>후보 ID</dt>")
             self.assertLess(target, candidate)
-            self.assertIn("<dt>타겟</dt><dd>example/demo</dd>", rendered)
+            self.assertIn('<dt>타겟</dt><dd><a href="https://github.com/example/demo" target="_blank" rel="noopener noreferrer">example/demo</a></dd>', rendered)
             self.assertIn("<dt>분석 커밋</dt><dd><code>aaaaaaaaaaaa</code></dd>", rendered)
 
 
