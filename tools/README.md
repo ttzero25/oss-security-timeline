@@ -1,12 +1,12 @@
 # Tools
 
-The main command line is `python3 -m oss_timeline`. It provides `sync`, `watch`, `report`, `benchmark`, `benchmark-upstream`, `audit`, `research-run`, `poc-init`, `poc-verify` and `disclosure`.
+The main command line is `python3 -m oss_timeline`. It provides `sync`, `watch`, `report`, `benchmark`, `benchmark-upstream`, `audit`, `research-run`, `research-replay`, `poc-init`, `poc-verify`, `disclosure`, `report-status`, and `report-mark`.
 
 `python3 -m oss_timeline benchmark` runs the versioned local static-analysis corpus without executing target code. It writes case-level recall, precision, clean specificity, rank and coverage to `data/benchmarks/latest.json`; optional threshold flags return exit code 2 when the scanner regresses.
 
 `python3 -m oss_timeline benchmark-upstream` fetches each historical case's immutable commit into a temporary checkout and statically scans the full repository with the cited source paths prioritized. It never builds or executes target code. Vulnerable and fixed refs are scored only for the expected kind on those cited paths, while unrelated findings remain outside the pair verdict. Results are written to `data/benchmarks/upstream-latest.json` and shown separately in the web summary.
 
-`python3 tools/web.py --port 8765` starts the loopback-only dashboard. Home shows cumulative counts and agent roles; the lab accepts a public GitHub repository URL and runs advisory collection, repository profiling, static code research, and supported bounded PoC contrasts; summary compares results by repository and package; the relationship graph connects repositories, packages, advisories, CVEs, CWEs, referenced fix commits and code hypotheses; reports reads generated evidence and private drafts. It writes local `data/timeline.sqlite3` and `data/research/`. The web may run only allowlisted local PoC contrasts; it never modifies a completed draft or submits a disclosure. Only one web research job runs at a time. Its results are bounded by 100 API pages and 100 manifests, so review coverage warnings before treating them as complete.
+`python3 tools/web.py --port 8765` starts the loopback-only dashboard. Home shows cumulative counts and agent roles; the lab accepts a public GitHub repository URL and runs advisory collection, repository profiling, static code research, and supported bounded PoC contrasts; summary compares results by repository and package; the relationship graph connects repositories, packages, advisories, CVEs, CWEs, referenced fix commits and code hypotheses; reports show every research target plus generated evidence and private drafts. The lab displays stage-based estimated progress and jump links for advisory, fix comparison, source research, and scope. It writes local `data/timeline.sqlite3` and `data/research/`. The web may run only allowlisted local PoC contrasts; it never modifies a completed draft or submits a disclosure. Only one web research job runs at a time. Its results are bounded by 100 API pages and 100 manifests, so review coverage warnings before treating them as complete.
 
 The Lab's bundled self-test runs a harmless, deliberately vulnerable local fixture through the same audit, reachability, bounded PoC contrast, evidence gate, and GHSA/CVE draft pipeline used for repository research. It does not fetch or test a third-party project and must not be interpreted as a real vulnerability report. Successful drafts appear immediately in Reports and remain manual-submission-only.
 
@@ -20,7 +20,7 @@ After the first observation, commit collection requests only the interval since 
 
 The lab's before/after section compares advisory-linked vulnerable and patched package versions. It also displays removed and added lines from at most five commit URLs explicitly cited by advisories and belonging to the selected GitHub repository. These referenced diffs are evidence to review, not an automatic claim that a commit fully fixes a vulnerability.
 
-Web job status is saved under `data/web-jobs.json`. On restart, a job that was still running is marked interrupted rather than silently disappearing; it is not automatically resumed.
+Web job status is saved under `data/web-jobs.json`. On restart, a job that was still running is returned to the queue and resumed. Transient API, OS, or runtime failures retry at most three times with a bounded delay; completed database and research artifacts are retained.
 
 At startup the web process reconciles completed legacy `audit.json` plus `orchestration.json` pairs into `research_runs` without executing target code again. An audit without an orchestration result remains labeled as static-only rather than being shown as never run.
 

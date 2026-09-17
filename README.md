@@ -1,31 +1,46 @@
-# 오픈소스 보안 타임라인
+# OSS Security Timeline
 
-## 프로젝트 목적
+GitHub 오픈소스 저장소의 업데이트와 CVE·GHSA·OSV 공지를 시간순으로 추적하고, 코드에서 찾은 보안 가설을 제한된 PoC로 검증해 사람이 검토할 비공개 제보 초안까지 연결하는 로컬 보안 조사 도구입니다.
 
-GitHub 오픈소스 저장소의 변경과 공개 취약점 공지를 한 시간축에 모아, 어떤 저장소와 패키지에 보안 이슈가 집중됐는지 확인합니다. 코드 조사에서는 미공개 취약점의 **가설**을 만들고, 실제 코드와 PoC로 검증된 결과만 비공개 GHSA 제보 초안과 CVE 요청 브리프로 정리합니다.
+> 코드 후보는 취약점이나 제로데이 확정 결과가 아닙니다. 외부 제보와 CVE/GHSA 요청은 항상 사람이 검토하고 직접 수행합니다.
 
-## 한눈에 보기
+## 무엇을 제공하나
 
-- GitHub 릴리스·커밋, 저장소 보안 공지, 패키지별 검토/미검토 GHSA 및 OSV 기록을 수집합니다.
-- CVE/GHSA 별칭을 같은 공지로 묶고, 게시·수정·최초 관측 시각을 저장해 타임라인과 저장소·패키지 순위를 만듭니다.
-- 공개 공지 예측은 Gamma–Poisson 후방 예측 구간과 표본 기반 신뢰 등급, 가능한 경우 최근 12개월 후향 검증을 함께 표시합니다. 저장소 활동량과 코드 규모는 보정 전 참고값으로만 노출하며, 미공개 제로데이 발생 수는 예측하지 않습니다.
-- 실험실의 보안 공지 표에는 GHSA/원본 식별자와 등록된 CVE를 별도 칸에 표시하고, 공지 원문에 명시된 CWE 유형만 보여줍니다.
-- 실험실은 공지의 영향 버전과 패치 버전을 비교하고, 공지가 같은 저장소의 커밋을 직접 참조하면 삭제·추가된 코드 줄을 나란히 보여줍니다. 이 참조만으로 해당 커밋이 완전한 fix라고 판정하지 않습니다.
-- 공개 변경 메시지와 Python·JavaScript/TypeScript·Go·C/C++ 코드에서 검토 후보를 찾습니다. Python은 단순 할당과 모듈 간 함수·해석 가능한 클래스 인스턴스 메서드 호출을 최대 네 단계까지 추적하고, 변경되지 않는 리터럴 allowlist 조회는 고정값 경계로 취급합니다. JavaScript/TypeScript는 일반 이름 함수와 화살표 함수의 스코프를 분리하고 상대경로 ESM/CommonJS 호출을 제한적으로 추적합니다. Go는 HTTP·CLI 입력이 같은 패키지나 로컬 패키지 함수를 거치는 경로를 제한적으로 추적합니다. 지원 후보 유형은 명령·코드 실행, 역직렬화, SSRF, SQL·서버 템플릿 주입, 경로 조작과 일부 네이티브 메모리·포맷 패턴입니다. 각 분석은 입력→호출→위험 동작의 코드 경로를 남깁니다. 후보는 취약점이나 제로데이 확정 결과가 아닙니다.
-- 심층 조사 전에 커밋별 저장소 프로필을 만들어 언어 분포, 프레임워크, 프로젝트 유형, 패키지·빌드 매니페스트, lockfile, HTTP·CLI·메시지 엔트리포인트, 최근 변경 파일과 미지원 코드 파일 수를 기록합니다. 이 범위 원장은 “후보 0건”을 전수 안전 판정으로 오인하지 않게 합니다.
-- 대규모 저장소에서는 최근 변경 파일을 먼저 분석하고 나머지를 경로순으로 처리합니다. 파일 상한 때문에 제외된 수를 기록하며, 같은 커밋·같은 상한·깨끗한 작업 트리의 재실행은 정적 조사 결과를 재사용하되 공개 공지 스냅샷은 다시 읽습니다.
-- Research Orchestrator는 최근 변경 경로와 운영 코드 우선순위를 반영하고, 기본 설정 도달성 확인, 제한된 Python·JavaScript/TypeScript·Go 후보의 실제 함수 호출 PoC, 격리 대조, 수집된 공개 공지 중복 점검을 연결합니다. 미지원 후보는 실행 예산을 소모하지 않으며 지원 후보는 언어·취약점 유형별로 균형 선별합니다. Python 명령·코드 실행은 모듈 최상위 동기·비동기 함수와 부작용 없는 무인자 클래스의 메서드를 지원합니다. Python SSRF 자동 재현은 허용된 HTTP import와 단일 인자·직접 sink 함수로 제한하고, 대상 해시를 고정한 뒤 HTTP 클라이언트를 메모리 스텁으로 교체해 실제 네트워크 없이 정상/loopback 입력을 대조합니다. Python SQL 자동 재현은 제한된 문자열 조립식과 단일 `execute`만 허용하고 메모리 가짜 커서로 조립된 쿼리를 관측하므로 실제 DB에 연결하지 않습니다. Python 경로 조작 자동 재현은 단일 `open`/`Path` 읽기만 허용하고 정상 파일과 `..` 대상을 모두 임시 scratch 안에 만듭니다. Python `pickle.loads` 재현은 실제 역직렬화 경로를 호출하지만 공격 객체의 효과를 고유 문자열 stdout 출력으로만 제한합니다. JavaScript와 Node.js 22+ TypeScript 자동 실행은 Node 내장 모듈만 가져오고 import 외 최상위 실행문이 없는 단일 default export 함수로 제한합니다. Go는 표준 라이브러리만 쓰는 단일 파일·단일 함수 HTTP 핸들러를 원문 해시 확인 후 임시 디렉터리에서 `GOPROXY=off`로 실행합니다. 중복 점검은 CVE/GHSA, CWE, 패키지, 코드 경로·함수 토큰과 공지 참조 커밋을 점수화하며 7일보다 오래된 스냅샷에서는 초안을 중단합니다. 마지막으로 외부 도달성·기본 설정·공격자 통제·보안 영향·기존 공지 중복의 다섯 근거를 기록합니다. 게이트를 통과한 결과만 제보 **초안**으로 만들며 외부 제출과 CVE/GHSA 번호 부여는 자동으로 하지 않습니다.
-- 기본 PoC 검증은 CPU·출력 크기·파일 디스크립터를 제한한 로컬 프로세스이며, macOS에서는 사용 가능한 시스템 sandbox로 네트워크를 막고 쓰기를 임시 scratch로 제한합니다. 실제 적용 모드는 증거 JSON에 기록되고 Docker 격리는 선택 사항으로 유지됩니다.
-- Flask/Jinja 의존성이 없는 환경의 템플릿 주입 재현은 제한된 호환 sink로 실제 대상 함수의 입력 전달만 확인합니다. 이 경우 증거에 `compatible_sink_control_not_framework_execution`을 남기고 보안 영향 게이트를 부분 확인으로 유지하며, 실제 프레임워크 실행으로 과장하지 않습니다.
-- Python PoC 실행 전 import를 표준/설치됨·저장소 로컬·생성기 스텁·누락으로 분류합니다. 자동 패키지 설치는 하지 않으며, 스텁 허용 범위 밖의 누락 의존성이 있으면 실행 전에 중단 사유를 남깁니다.
-- 로컬 웹의 Home에서 누적 탐지와 에이전트 역할을, 실험실에서 저장소별 조사 상태와 PoC 생성기·검증 범위·의존성 사전검사를, 정리에서 OSS별 요약을 확인할 수 있습니다. Fix 전후 비교는 연·월 필터와 접기 가능한 커밋/파일 차이를 제공합니다. 관계망은 데이터 연결을 기본 80개 노드로 간소화해 보여주고 표준·전체 밀도로 늘릴 수 있으며, 리포트는 CLI에서 생성된 검증 결과와 비공개 초안을 읽기 전용으로 보여줍니다. 상단 밝기 버튼으로 낮/밤 테마를 전환하며 선택은 브라우저에만 저장됩니다.
-- 웹 시작 시 과거 `audit.json`과 `orchestration.json` 쌍을 실행하지 않고 타임라인 DB에 이관합니다. 정리 화면은 `미실행`, `정적 조사만 완료`, `완료 · 후보 없음`, `완료 · 검토 후보 있음`, `완료 · 초안 준비`를 구분합니다.
+- GitHub 릴리스·커밋·저장소 보안 공지와 패키지별 GitHub/OSV 공지를 수집합니다.
+- CVE와 GHSA 별칭을 하나의 공지로 묶고 게시·수정·최초 관측 시각을 저장합니다.
+- 저장소와 패키지별 공지 수, 공개 변경 이력, 향후 공개 공지 추정치를 비교합니다.
+- 공지에 연결된 영향 버전과 패치 버전, 참조 커밋의 삭제·추가 코드를 전후로 비교합니다.
+- 저장소의 언어·프레임워크·매니페스트·lockfile·엔트리포인트와 조사 범위를 기록합니다.
+- Python, JavaScript/TypeScript, Go, C/C++ 및 일부 GitHub Actions 패턴에서 입력부터 위험 동작까지의 코드 가설을 찾습니다.
+- 지원되는 후보는 제한된 정상/공격 대조 PoC로 검증하고, 근거 게이트를 통과한 경우에만 GHSA 비공개 제보 초안과 CVE 요청 브리프를 만듭니다.
+- 저장소, 패키지, 공지, CVE, CWE, fix 커밋과 코드 후보의 관계를 그래프로 탐색합니다.
 
-Python 3.11 이상이 필요합니다. 기본 CLI와 웹 화면에는 추가 Python 패키지나 Docker가 필요하지 않습니다. 웹은 `GITHUB_TOKEN`이 없으면 설치·로그인된 GitHub CLI의 인증을 메모리에서만 활용합니다. 어느 쪽도 없으면 비인증 API 한도가 적용되므로 읽기용 토큰을 권장합니다. 더 강한 PoC 격리가 필요할 때만 Docker와 `--container`를 사용합니다.
+## 웹 화면
 
-## 신규 팀원을 위한 빠른 시작
+| 화면 | 용도 |
+| --- | --- |
+| Home | 누적 저장소·공지·변경·코드 후보·PoC 대조 수와 에이전트 구성 확인 |
+| 실험실 | GitHub URL 입력, 수집·심층 조사 실행, 단계별 진행률과 조사 결과 확인 |
+| 정리 | 저장소·패키지별 결과, 벤치마크와 공개 공지 추정치 비교 |
+| 관계망 | 저장소에서 공지·CVE·CWE·패키지·커밋·코드 후보로 이어지는 관계 탐색 |
+| 리포트 | 모든 조사 타겟의 상태와 검증된 PoC 증거, GHSA/CVE 초안 열람 |
 
-1. 비공개 저장소 접근 권한을 받은 뒤 프로젝트를 복제합니다.
+실험실에서는 저장소 요약 아래 바로가기로 보안 공지, Fix 전후, 코드 조사, 조사 범위로 이동할 수 있습니다. Fix 전후 화면은 연·월 필터와 공지·파일별 드롭다운을 제공하며, 리포트 화면은 초안이 없는 저장소도 조사 타겟 현황에 표시합니다. 낮/밤 테마 선택은 브라우저에만 저장됩니다.
+
+## 요구 사항
+
+- Python 3.11 이상
+- Git
+- 공개 GitHub 저장소를 읽을 수 있는 네트워크
+- 권장: 읽기 전용 `GITHUB_TOKEN` 또는 로그인된 GitHub CLI
+- 선택: 더 강한 PoC 격리가 필요할 때만 Docker
+- JavaScript/TypeScript 또는 Go 후보를 실행하려면 해당 로컬 런타임
+
+기본 CLI와 웹에는 추가 Python 패키지가 필요하지 않습니다. 토큰이 없으면 GitHub 비인증 API 한도가 적용됩니다. 인증 값은 DB나 웹 응답에 저장하지 않습니다.
+
+## 빠른 시작
+
+1. 저장소를 복제합니다.
 
    ```sh
    git clone https://github.com/ttzero25/oss-security-timeline.git
@@ -33,69 +48,89 @@ Python 3.11 이상이 필요합니다. 기본 CLI와 웹 화면에는 추가 Pyt
    python3 --version
    ```
 
-2. 읽기용 GitHub 토큰을 환경 변수로 제공합니다. 이미 `gh auth login`으로 로그인했다면 웹 실행 시 GitHub CLI 인증을 자동 사용하므로 이 단계는 생략할 수 있습니다. 조사할 공개 저장소 URL은 실험실 화면에서 입력합니다.
+2. GitHub API 인증을 준비합니다. 이미 `gh auth login`을 사용했다면 이 단계는 생략할 수 있습니다.
 
    ```sh
    export GITHUB_TOKEN=YOUR_READ_ONLY_GITHUB_TOKEN
    ```
 
-3. 웹 화면을 실행하고 브라우저에서 [http://127.0.0.1:8765/](http://127.0.0.1:8765/)을 엽니다. 실험실에서 `https://github.com/owner/repo` 형식의 링크를 입력하면 공개 공지 수집, 저장소 프로파일링, 정적 코드 조사와 지원되는 제한 PoC 대조를 백그라운드에서 시작합니다. 연구 단계 변화는 공개 공지와 구분된 이벤트로 같은 타임라인 DB에 저장됩니다. Home은 누적 수치, 정리는 OSS별 결과, 관계망은 데이터 간 연결입니다. 서버는 `127.0.0.1`에만 바인딩합니다.
+3. 로컬 웹을 실행합니다.
 
    ```sh
    python3 tools/web.py --port 8765
    ```
 
-4. 제보 초안은 자동 제출되지 않습니다. 사람이 검토·제출한 뒤 다음 명령으로 로컬 상태만 기록하면 리포트 탭에 반영됩니다.
+4. 브라우저에서 [http://127.0.0.1:8765/](http://127.0.0.1:8765/)을 열고 실험실에 `https://github.com/owner/repository` 형식의 링크를 입력합니다.
 
-   ```bash
-   python3 -m oss_timeline report-mark data/research/OWNER_REPO/COMMIT/audit.json FINDING_ID --status reviewed
-   python3 -m oss_timeline report-mark data/research/OWNER_REPO/COMMIT/audit.json FINDING_ID --status submitted --reference '제출 URL 또는 접수 번호'
-   python3 -m oss_timeline report-status data/research/OWNER_REPO/COMMIT/audit.json FINDING_ID
-   ```
+웹은 `127.0.0.1`에만 바인딩하며 한 번에 한 저장소를 조사합니다. 실행 상태는 `data/web-jobs.json`에 저장되고 서버가 중단되면 다음 시작 시 대기열에서 재개됩니다. 진행률은 작업 단계에 따른 예상치이며 파일 단위의 정밀한 완료율은 아닙니다.
 
-4. 다른 터미널에서 회귀 검사를 실행합니다.
+## 링크 하나로 심층 조사
 
-   ```sh
-   python3 -m unittest discover -s tests
-   ```
-
-5. 라벨된 로컬 코퍼스로 현재 정적 탐지 기준선을 측정합니다. 결과는 `data/benchmarks/latest.json`에 저장되고 웹의 정리 화면에도 표시됩니다.
-
-   ```sh
-   python3 -m oss_timeline benchmark
-   ```
-
-6. 공개 사례의 불변 커밋을 전체 체크아웃하여 발췌문 밖의 실제 저장소에서도 같은 취약/수정 차이가 유지되는지 측정합니다. 대상 코드는 빌드하거나 실행하지 않으며 결과는 `data/benchmarks/upstream-latest.json`에 저장됩니다.
-
-   ```sh
-   python3 -m oss_timeline benchmark-upstream --max-files 20000
-   ```
-
-웹은 한 번에 한 저장소를 조사하며 API 페이지와 매니페스트를 각각 최대 100개, 공지 참조 커밋은 최대 5개까지 읽습니다. 두 번째 수집부터는 마지막 관측 시각 이후 커밋만 요청해 API 사용량을 줄이되, 첫 수집에서 잘린 과거 이력은 완료로 오인하지 않고 경고를 유지합니다. 조사 완료 뒤 실험실의 수집 범위와 경고를 확인하세요. CWE와 참조 커밋 비교는 새 수집부터 채워지므로 기존 저장소는 다시 수집해야 합니다. 더 세밀한 범위 설정과 정기 관측에는 CLI의 `sync`·`watch`를 사용합니다. 문제가 생기면 [troubleshooting](troubleshooting/README.md)을 먼저 확인하세요.
-
-## 코드 조사와 제보 흐름
-
-`python3 -m oss_timeline audit https://github.com/owner/repo`는 공개 저장소의 최신 커밋을 새 로컬 디렉터리에 복제해 코드 가설을 `data/research/`에 기록합니다. 로컬 체크아웃은 `python3 -m oss_timeline audit /path/to/checkout --repo owner/repo`로 조사할 수 있습니다. 출력된 `audit.json`에서 후보 ID와 조사 범위를 확인합니다.
-
-지원되는 제한 자동화는 아래 명령으로 실행합니다. URL을 입력하면 먼저 공개 공지를 갱신해 중복 검토 스냅샷을 만든 뒤 코드를 조사합니다. 기본 PoC는 별도 임시 작업공간, 제한된 환경 변수, 실행 시간·출력 제한을 둔 로컬 subprocess에서 실행하며 Linux에서는 추가 OS 자원 한도를 적용합니다. 이 방식은 컨테이너 수준의 파일·네트워크 격리는 아니므로 더 강한 격리가 필요하면 `--container`를 추가합니다. 안전한 자동 재현 템플릿이 없는 후보는 억지로 실행하지 않고 `orchestration.json`에 중단 사유를 남깁니다.
+웹 실험실과 다음 CLI 명령은 같은 조사 흐름을 사용합니다.
 
 ```sh
-python3 -m oss_timeline research-run https://github.com/owner/repo --max-candidates 3
+python3 -m oss_timeline research-run https://github.com/owner/repository --max-candidates 3
 ```
 
-지원 파일이 기본 20,000개 상한을 넘는 대형 저장소는 CLI에서 명시적으로 전체 샤드 순회를 요청할 수 있습니다. `--max-files`는 이때 한 샤드의 크기가 되며, 웹의 기본 실행은 응답 시간과 자원 사용을 위해 기존 상한을 유지합니다.
+처리 흐름은 다음과 같습니다.
+
+```text
+공개 공지 동기화
+  → 저장소 복제·프로파일링
+  → 정적 코드 가설 생성
+  → 후보 우선순위화·도달성 확인
+  → 허용된 PoC 생성
+  → 자원 제한 정상/공격 대조
+  → 기존 공지·보안 변경 중복 검토
+  → 5개 근거 게이트
+  → GHSA/CVE 비공개 초안
+```
+
+대규모 저장소의 지원 코드 전체를 결정적 샤드로 끝까지 순회하려면 다음처럼 실행합니다. `--max-files`는 샤드 하나의 크기입니다.
 
 ```sh
-python3 -m oss_timeline research-run https://github.com/owner/repo --complete-scan --max-files 20000 --max-candidates 3
+python3 -m oss_timeline research-run https://github.com/owner/repository \
+  --complete-scan --max-files 20000 --max-candidates 3
 ```
 
-이미 생성된 `audit.json`을 재수집·재스캔 없이 최신 후보 선별 및 제한 PoC 엔진으로 다시 검증할 수도 있습니다. `research-replay`는 같은 orchestration 결과에서 이미 시도한 후보를 보존하고 건너뛰어 이월된 지원 후보의 다음 묶음으로 진행합니다.
+기존 감사 결과에서 아직 시도하지 않은 지원 후보의 다음 묶음만 이어서 검증할 수도 있습니다.
 
 ```sh
-python3 -m oss_timeline research-replay data/research/OWNER_REPO/COMMIT/audit.json --max-candidates 3
+python3 -m oss_timeline research-replay \
+  data/research/OWNER_REPOSITORY/COMMIT/audit.json \
+  --max-candidates 3
 ```
 
-후보가 남으면 `poc-init`으로 `proof.py`, `manifest.json`, `claim.example.json`을 준비합니다. 조사한 커밋의 **실제 앱 경로**를 호출하도록 PoC를 완성하고, 정상 입력 대조군과 보안 영향을 명시한 `claim.json`을 작성하세요. `poc-verify`는 기본적으로 자원 제한 로컬 subprocess에서 두 입력을 실행합니다. 네트워크 차단과 읽기 전용 저장소 마운트가 필요하면 `--container`를 사용합니다. 재현 결과와 코드 인용이 같은 커밋에 맞고, 기존 공지 조사 근거가 채워지면 `disclosure`가 `GHSA_CANDIDATE.md`와 `CVE_REQUEST_BRIEF.md`를 만듭니다.
+웹의 `번들 fixture로 PoC·리포트 self-test`는 외부 저장소 대신 무해한 로컬 취약 fixture를 사용해 PoC 대조와 초안 생성까지 점검합니다. 이 결과는 실제 프로젝트 취약점이 아니며 리포트에서 `fixture/web-self-test`로 구분됩니다.
+
+## CLI 명령
+
+| 명령 | 설명 |
+| --- | --- |
+| `sync` | 저장소 업데이트·공지·패키지 정보를 한 번 수집 |
+| `watch` | 지정한 간격으로 반복 관측 |
+| `report` | 수집 결과를 JSON 또는 HTML로 출력 |
+| `audit` | 로컬 또는 원격 저장소에서 정적 코드 가설 생성 |
+| `research-run` | 수집부터 제한 PoC와 제보 초안까지 실행 |
+| `research-replay` | 기존 감사에서 이월된 후보를 이어서 검증 |
+| `poc-init` | 수동 검증용 PoC 작업공간과 manifest 생성 |
+| `poc-verify` | 정상/공격 대조를 자원 제한 환경에서 실행 |
+| `disclosure` | 검증 근거로 GHSA/CVE 초안 생성 |
+| `report-status` | 사람의 제보 처리 상태 조회 |
+| `report-mark` | 검토·제출·접수 결과를 로컬에 기록 |
+| `benchmark` | 버전 관리된 로컬 코퍼스의 정적 탐지 회귀 측정 |
+| `benchmark-upstream` | 공개 사례의 고정 커밋 전체 저장소에서 정적 탐지 평가 |
+
+전체 옵션은 다음 명령으로 확인합니다.
+
+```sh
+python3 -m oss_timeline --help
+python3 -m oss_timeline research-run --help
+```
+
+## 수동 PoC와 제보 초안
+
+자동 재현을 지원하지 않는 후보는 억지로 실행하지 않고 중단 사유를 기록합니다. 사람이 직접 검증할 때는 다음 흐름을 사용합니다.
 
 ```sh
 python3 -m oss_timeline poc-init path/to/audit.json FIND-XXXXXXXXXXXX
@@ -105,29 +140,97 @@ python3 -m oss_timeline disclosure path/to/audit.json FIND-XXXXXXXXXXXX \
   --evidence path/to/FIND-XXXXXXXXXXXX/evidence.json
 ```
 
-두 파일은 로컬의 비공개 제출용 초안이며 웹의 `리포트` 탭에도 자동으로 나타납니다. 웹은 파일을 읽기만 하고 실행·수정·제출하지 않습니다. 보고 전 코드 경로와 PoC가 같은 문제를 입증하는지 사람이 검토하고, [GitHub 비공개 취약점 제보](https://docs.github.com/en/code-security/how-tos/report-and-fix-vulnerabilities/report-privately) 또는 프로젝트 보안 정책을 따라 직접 제출하세요. CVE 번호는 [관리자 또는 해당 CNA 절차](https://docs.github.com/en/code-security/concepts/vulnerability-reporting-and-management/repository-security-advisories)에 따라 요청합니다.
+`claim.json`에는 실제 대상 코드 경로, 공격자 통제, 정상 대조군, 영향과 중복 조사 근거를 작성해야 합니다. `disclosure`가 만드는 `GHSA_CANDIDATE.md`와 `CVE_REQUEST_BRIEF.md`는 로컬 비공개 초안이며 자동 제출되지 않습니다.
+
+사람이 검토하고 제출한 결과만 로컬 상태로 기록합니다.
+
+```sh
+python3 -m oss_timeline report-mark path/to/audit.json FIND-XXXXXXXXXXXX --status reviewed
+python3 -m oss_timeline report-mark path/to/audit.json FIND-XXXXXXXXXXXX \
+  --status submitted --reference '제출 URL 또는 접수 번호'
+python3 -m oss_timeline report-status path/to/audit.json FIND-XXXXXXXXXXXX
+```
+
+## 자동 재현의 안전 경계
+
+- 기본 실행은 시간·CPU·출력·파일 디스크립터를 제한한 별도 로컬 프로세스입니다.
+- macOS에서는 사용 가능한 시스템 sandbox로 네트워크를 차단하고 쓰기를 임시 scratch로 제한합니다.
+- Python SSRF는 HTTP 클라이언트를 메모리 스텁으로 바꿔 실제 네트워크에 연결하지 않습니다.
+- SQL 후보는 가짜 커서로 조립된 쿼리만 관측하며 실제 DB에 연결하지 않습니다.
+- 경로 조작 후보는 임시 scratch 내부의 정상 파일과 `..` 대조만 사용합니다.
+- `pickle.loads` 공격 객체의 효과는 고유 문자열의 표준 출력으로 제한합니다.
+- JavaScript/TypeScript는 Node 내장 모듈 중심의 제한된 함수만 실행합니다.
+- Go는 표준 라이브러리 기반 단일 파일 후보를 해시 확인 후 `GOPROXY=off`로 실행합니다.
+- 누락 의존성을 자동 설치하지 않습니다. 허용된 스텁 범위를 벗어나면 실행 전에 중단합니다.
+- 더 강한 읽기 전용·네트워크 격리가 필요할 때만 `--container`를 사용합니다.
+
+실제 실행 모드, 생성기, 검증 범위와 정상/공격 대조 결과는 후보별 `evidence.json`에 기록됩니다.
+
+## 검증과 벤치마크
+
+```sh
+python3 -m unittest discover -s tests
+python3 -m oss_timeline benchmark --min-recall 1 --max-false-positive-cases 0
+python3 -m oss_timeline benchmark-upstream --max-files 20000
+```
+
+로컬 벤치마크는 탐지 규칙의 회귀를 찾기 위한 합성·집중 사례입니다. 실제 저장소의 전체 탐지율이나 제로데이 발견 성능을 의미하지 않습니다. 자세한 범위는 [benchmarks/README.md](benchmarks/README.md)를 확인하세요.
+
+## 데이터와 수집 범위
+
+| 경로 | 생성 내용 |
+| --- | --- |
+| `data/timeline.sqlite3` | 저장소, 공지, 패키지, 공개 변경과 연구 상태 |
+| `data/checkouts/` | 조사 대상 로컬 복제본 |
+| `data/research/` | 프로필, 감사 결과, PoC 증거와 제보 초안 |
+| `data/fix-comparisons/` | 공지가 참조한 커밋의 전후 코드 |
+| `data/benchmarks/` | 최근 벤치마크 결과 |
+| `data/web-jobs.json` | 웹 작업과 재개 상태 |
+
+웹 수집은 기본적으로 API 페이지와 매니페스트를 각각 최대 100개, 공지 참조 커밋을 최대 5개까지 처리합니다. 두 번째 관측부터는 마지막 동기화 이후 커밋만 요청해 API 사용량을 줄입니다. 첫 수집의 과거 이력이 잘렸다면 완료로 표시하지 않고 경고를 유지합니다.
+
+여기서 “전수”는 접근 가능한 공개 API와 설정한 상한 안에서의 전수를 뜻합니다. 기본 브랜치 밖의 기록, 삭제된 과거 패키지, 모든 CVE 등록부 항목은 빠질 수 있습니다. 코드 전체 순회는 `--complete-scan`을 명시한 경우에만 수행합니다. 후보 0건은 안전 판정이 아닙니다.
+
+공개 공지 예측은 과거 게시 건수로 향후 12개월을 추정합니다. 공개 공지 5건과 관측 기간 24개월이 확보되지 않으면 계산하지 않으며, 관측할 수 없는 미공개 제로데이 발생 수는 예측하지 않습니다.
 
 ## 프로젝트 구조
 
 | 위치 | 내용 |
 | --- | --- |
-| [agents](agents/README.md) | 11개 역할별 입력·출력과 실행 흐름 |
-| [tools](tools/README.md) | CLI 안내와 로컬 수집·조회 웹 도구 |
-| [rules](rules/README.md) | 코드 탐지, PoC 검증, 비공개 제보 기준 |
-| [troubleshooting](troubleshooting/README.md) | API 제한·PoC 실행·수집 누락 등의 해결 방법 |
-| `oss_timeline/` | 실행 코드와 SQLite 저장·보고서 생성 |
-| `tests/` | 수집·중복 제거·PoC·제보 게이트 회귀 검사 |
-| `benchmarks/` | 취약·정상 대조 사례와 정적 탐지 성능 기준선 |
-| `data/` | 실행 중 생성되는 DB, 복제본, PoC, 비공개 초안; Git 제외 |
+| [agents/](agents/README.md) | 12개 에이전트 역할과 입력·출력 |
+| [rules/](rules/README.md) | 탐지·오케스트레이션·검증·제보 기준 |
+| [tools/](tools/README.md) | CLI와 로컬 웹의 상세 동작 |
+| [benchmarks/](benchmarks/README.md) | 정적 탐지 회귀 코퍼스와 평가 방법 |
+| [troubleshooting/](troubleshooting/README.md) | API 제한, 조사 누락, PoC 오류 해결 |
+| `oss_timeline/` | CLI, 수집기, 저장소, 스캐너와 오케스트레이터 |
+| `tests/` | 수집·탐지·PoC·제보 게이트 회귀 검사 |
 
-공개 데이터 흐름은 `InventoryAgent → (ChangeAgent + AdvisoryAgent 병렬) → CandidateAgent`입니다. 코드 조사 흐름은 `RepositoryProfilerAgent → SourceScanAgent → ReachabilityGateAgent → ResearchOrchestrator → PocValidatorAgent → EvidenceGateAgent → DisclosureAgent`이며 결과 상태가 다시 타임라인에 들어갑니다. 이 역할들은 재현 가능한 Python 모듈이며, 지원 범위를 벗어난 후보는 사람의 분석 대상으로 남깁니다.
+타임라인 흐름:
 
-## 결과를 해석할 때
+```text
+InventoryAgent → (ChangeAgent + AdvisoryAgent) → CandidateAgent → DB·보고서
+```
 
-“전수”는 접근 가능한 공개 API 페이지와 설정한 수집 상한 안에서의 전수를 뜻합니다. 코드 조사는 `--complete-scan`을 지정한 경우에만 지원 파일을 결정적 샤드로 끝까지 순회합니다. 기본 브랜치 밖의 커밋, 삭제된 과거 패키지, CVE 전체 등록부의 모든 항목은 포함되지 않을 수 있습니다. API 실패·페이지 제한·Git 트리 잘림은 결과의 `coverage`와 `warnings`에 표시됩니다. 공지 수정 이력은 정기 관측을 시작한 시점부터 기록합니다.
+코드 조사 흐름:
 
-수치 예측은 과거 **공개 보안 공지 게시 건수**로 향후 12개월을 추정합니다. 공개 공지 5건과 관측 기간 24개월 미만이면 산출하지 않으며, 관측할 수 없는 미공개 제로데이 발생 수는 예측하지 않습니다. 코드 스캔의 빈 결과도 안전성의 증거가 아닙니다.
+```text
+RepositoryProfilerAgent → SourceScanAgent → ReachabilityGateAgent
+→ ResearchOrchestrator → PocValidatorAgent → DuplicateReviewAgent
+→ EvidenceGateAgent → DisclosureAgent → 연구 타임라인
+```
 
-데이터 원천: [GitHub 저장소 보안 공지 API](https://docs.github.com/en/rest/security-advisories/repository-advisories), [GitHub 글로벌 보안 공지 API](https://docs.github.com/en/rest/security-advisories/global-advisories), [GitHub Git Trees API](https://docs.github.com/en/rest/git/trees), [OSV](https://osv.dev/).
+역할별 설명은 [agents/README.md](agents/README.md), 실행 규칙은 [rules/README.md](rules/README.md)를 참고하세요.
 
-내장 벤치마크는 합성 사례의 회귀 감지용이며 실제 저장소의 탐지율이나 제로데이 발견 성능을 의미하지 않습니다. `--min-recall`과 `--max-false-positive-cases`로 자동 회귀 기준을 설정할 수 있습니다.
+## 결과 해석과 책임 있는 공개
+
+- 정적 분석 결과는 검토 후보입니다.
+- PoC 대조 성공은 모델링한 경로의 기계적 재현 근거이지 모든 배포 환경의 영향 증명이 아닙니다.
+- 공개 공지 중복 검토가 없거나 스냅샷이 오래되면 초안 생성을 중단합니다.
+- 공지 참조 커밋의 diff는 조사 근거이며 해당 변경이 완전한 fix라는 자동 판정이 아닙니다.
+- 비공개 제보 전 대상 커밋, 도달성, 기본 설정, 영향, 중복 여부를 사람이 다시 확인해야 합니다.
+
+제보는 프로젝트의 `SECURITY.md` 또는 [GitHub 비공개 취약점 제보 절차](https://docs.github.com/en/code-security/how-tos/report-and-fix-vulnerabilities/report-privately)를 따르세요. CVE 식별자는 프로젝트 관리자나 CNA의 절차에 따라 요청합니다.
+
+주요 공개 데이터 원천은 [GitHub Repository Security Advisories API](https://docs.github.com/en/rest/security-advisories/repository-advisories), [GitHub Global Security Advisories API](https://docs.github.com/en/rest/security-advisories/global-advisories), [GitHub Git Trees API](https://docs.github.com/en/rest/git/trees), [OSV](https://osv.dev/)입니다.
+
+문제가 생기면 [문제 해결 가이드](troubleshooting/README.md)를 먼저 확인하세요.
