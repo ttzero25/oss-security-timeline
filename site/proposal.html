@@ -44,7 +44,7 @@
 
     * { box-sizing: border-box; }
     html { scroll-behavior: smooth; }
-    body { margin: 0; background: var(--bg); color: var(--text); word-break: keep-all; overflow-wrap: break-word; letter-spacing: -.005em; }
+    body { margin: 0; background: var(--bg); color: var(--text); font-size: 15px; word-break: keep-all; overflow-wrap: break-word; letter-spacing: -.005em; }
     h1, h2, h3, h4, .summary-side strong { text-wrap: balance; }
     p, li, td { text-wrap: pretty; }
     a { color: inherit; }
@@ -82,35 +82,35 @@
     .hero::after { content: ""; position: absolute; width: 480px; height: 480px; right: -170px; top: -220px; border-radius: 50%; background: radial-gradient(circle, color-mix(in srgb, var(--accent) 20%, transparent), transparent 68%); pointer-events: none; }
     .kicker { display: inline-flex; align-items: center; gap: 9px; margin-bottom: 20px; color: var(--accent-2); font-size: 11px; font-weight: 900; letter-spacing: .16em; }
     .kicker::before { content: ""; width: 22px; height: 2px; background: var(--accent); }
-    .hero h1 { max-width: 870px; margin: 0; font-size: clamp(43px, 6vw, 78px); line-height: 1.03; letter-spacing: -.06em; }
+    .hero h1 { max-width: 870px; margin: 0; font-size: clamp(40px, 5.6vw, 72px); line-height: 1.03; letter-spacing: -.06em; }
     .hero h1 span, .hero h1 em { display: block; }
     .hero h1 em { color: var(--accent); font-style: normal; }
-    .hero-copy { max-width: 760px; margin: 25px 0 0; color: var(--muted); font-size: 17px; line-height: 1.8; }
+    .hero-copy { max-width: 760px; margin: 25px 0 0; color: var(--muted); font-size: 16px; line-height: 1.8; }
     .meta-row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 30px; }
     .meta-row span { padding: 8px 11px; border: 1px solid var(--line); border-radius: 999px; background: var(--paper); color: var(--muted); font-size: 11px; font-weight: 750; }
 
     .proposal-summary { display: grid; grid-template-columns: 1.2fr .8fr; gap: 16px; margin-top: 34px; }
     .summary-main, .summary-side { border: 1px solid var(--line); border-radius: 18px; background: var(--paper); box-shadow: var(--shadow); }
     .summary-main { padding: 28px; }
-    .summary-main h2 { margin: 0 0 13px; font-size: 24px; letter-spacing: -.035em; }
+    .summary-main h2 { margin: 0 0 13px; font-size: 22px; letter-spacing: -.035em; }
     .summary-main p { margin: 0; color: var(--muted); line-height: 1.75; }
     .summary-side { display: grid; grid-template-columns: 1fr 1fr; overflow: hidden; }
     .summary-side div { padding: 22px; border-left: 1px solid var(--line); }
     .summary-side div:first-child { border-left: 0; }
     .summary-side span { display: block; color: var(--muted); font-size: 10px; font-weight: 850; letter-spacing: .1em; }
-    .summary-side strong { display: block; margin-top: 9px; color: var(--accent-2); font-size: 17px; line-height: 1.45; }
+    .summary-side strong { display: block; margin-top: 9px; color: var(--accent-2); font-size: 16px; line-height: 1.45; }
 
     .section { padding: 72px 0 0; }
     .section-head { display: grid; grid-template-columns: 190px 1fr; gap: 34px; margin-bottom: 26px; }
     .section-index { color: var(--accent); font-size: 11px; font-weight: 900; letter-spacing: .16em; }
-    .section-head h2 { margin: 0 0 10px; font-size: clamp(28px, 3.6vw, 43px); letter-spacing: -.05em; }
+    .section-head h2 { margin: 0 0 10px; font-size: clamp(26px, 3.3vw, 39px); letter-spacing: -.05em; }
     .section-head p { max-width: 760px; margin: 0; color: var(--muted); line-height: 1.75; }
 
     .grid-3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 13px; }
     .grid-2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 13px; }
     .card { min-width: 0; padding: 24px; border: 1px solid var(--line); border-radius: 16px; background: var(--paper); }
     .card-number { display: inline-grid; place-items: center; width: 31px; height: 31px; border-radius: 9px; background: var(--accent-soft); color: var(--accent-2); font-size: 11px; font-weight: 900; }
-    .card h3 { margin: 18px 0 9px; font-size: 18px; letter-spacing: -.025em; }
+    .card h3 { margin: 18px 0 9px; font-size: 17px; letter-spacing: -.025em; }
     .card p { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.7; }
     .card ul { margin: 15px 0 0; padding-left: 18px; color: var(--muted); font-size: 13px; line-height: 1.85; }
 
@@ -121,7 +121,7 @@
 
     .scope-layout { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
     .scope-box { padding: 26px; border: 1px solid var(--line); border-radius: 17px; background: var(--paper); }
-    .scope-box h3 { margin: 0 0 18px; font-size: 19px; }
+    .scope-box h3 { margin: 0 0 18px; font-size: 18px; }
     .scope-box ul { list-style: none; padding: 0; margin: 0; }
     .scope-box li { position: relative; padding: 12px 0 12px 28px; border-top: 1px solid var(--line); color: var(--muted); font-size: 13px; line-height: 1.55; }
     .scope-box li:first-child { border-top: 0; }
@@ -154,11 +154,11 @@
     .snapshot { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; }
     .snapshot article { padding: 20px; border: 1px solid var(--line); border-radius: 14px; background: var(--paper); }
     .snapshot span, .snapshot small { display: block; color: var(--muted); font-size: 10px; line-height: 1.45; }
-    .snapshot strong { display: block; margin: 10px 0 8px; font-size: 27px; letter-spacing: -.04em; }
+    .snapshot strong { display: block; margin: 10px 0 8px; font-size: 25px; letter-spacing: -.04em; }
     .snapshot-note { margin: 12px 0 0; color: var(--muted); font-size: 11px; line-height: 1.65; }
 
     .safety-banner { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 22px; margin-bottom: 13px; padding: 22px 24px; border: 1px solid color-mix(in srgb, var(--warning) 45%, var(--line)); border-radius: 16px; background: var(--warning-soft); }
-    .safety-banner h3 { margin: 0 0 7px; font-size: 18px; }
+    .safety-banner h3 { margin: 0 0 7px; font-size: 17px; }
     .safety-banner p { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.65; }
     .safety-banner strong { color: var(--warning); font-size: 12px; white-space: nowrap; }
 
@@ -188,7 +188,7 @@
     .decision { margin-top: 72px; padding: 34px; border-radius: 20px; background: var(--accent-2); color: #f5fbf8; }
     .decision .kicker { color: #c9eadb; }
     .decision .kicker::before { background: #9bd3ba; }
-    .decision h2 { margin: 0; font-size: clamp(29px, 4vw, 45px); letter-spacing: -.045em; }
+    .decision h2 { margin: 0; font-size: clamp(27px, 3.7vw, 41px); letter-spacing: -.045em; }
     .decision p { max-width: 790px; margin: 15px 0 0; color: #d5e8df; line-height: 1.75; }
     .decision-list { display: grid; grid-template-columns: repeat(3, 1fr); gap: 9px; margin-top: 25px; }
     .decision-list div { padding: 16px; border: 1px solid rgba(255,255,255,.2); border-radius: 12px; background: rgba(255,255,255,.06); }
@@ -217,7 +217,7 @@
       .brand { font-size: 13px; }
       .actions .print { display: none; }
       .hero { padding-top: 56px; }
-      .hero h1 { font-size: clamp(36px, 11vw, 48px); line-height: 1.08; letter-spacing: -.045em; }
+      .hero h1 { font-size: clamp(33px, 10vw, 44px); line-height: 1.08; letter-spacing: -.045em; }
       .proposal-summary, .grid-3, .grid-2, .scope-layout, .pipeline, .roadmap, .risk-grid, .decision-list { grid-template-columns: 1fr; }
       .summary-side { grid-template-columns: 1fr; }
       .summary-side div { border-left: 0; border-top: 1px solid var(--line); }
@@ -308,7 +308,7 @@
       </div>
     </section>
 
-    <section class="section" id="solution">
+    <section class="section" id="solution" data-natural-copy>
       <div class="wrap">
         <div class="section-head">
           <span class="section-index">02 · PROPOSAL</span>
@@ -341,7 +341,7 @@
       </div>
     </section>
 
-    <section class="section">
+    <section class="section" data-natural-copy>
       <div class="wrap">
         <div class="section-head">
           <span class="section-index">03 · USERS</span>
@@ -355,7 +355,7 @@
       </div>
     </section>
 
-    <section class="section">
+    <section class="section" data-natural-copy>
       <div class="wrap">
         <div class="section-head">
           <span class="section-index">04 · CAPABILITIES</span>
@@ -391,7 +391,7 @@
       </div>
     </section>
 
-    <section class="section">
+    <section class="section" data-natural-copy>
       <div class="wrap">
         <div class="section-head">
           <span class="section-index">06 · CURRENT STATE</span>
@@ -408,7 +408,7 @@
       </div>
     </section>
 
-    <section class="section">
+    <section class="section" data-natural-copy>
       <div class="wrap">
         <div class="section-head">
           <span class="section-index">07 · SAFETY</span>
@@ -423,7 +423,7 @@
       </div>
     </section>
 
-    <section class="section" id="roadmap">
+    <section class="section" id="roadmap" data-natural-copy>
       <div class="wrap">
         <div class="section-head">
           <span class="section-index">08 · ROADMAP</span>
@@ -438,7 +438,7 @@
       </div>
     </section>
 
-    <section class="section" id="metrics">
+    <section class="section" id="metrics" data-natural-copy>
       <div class="wrap">
         <div class="section-head">
           <span class="section-index">09 · SUCCESS METRICS</span>
@@ -458,7 +458,7 @@
       </div>
     </section>
 
-    <section class="section">
+    <section class="section" data-natural-copy>
       <div class="wrap">
         <div class="section-head">
           <span class="section-index">10 · RISKS</span>
@@ -536,6 +536,8 @@ http://127.0.0.1:8765/</code></div>
     ].join(','));
 
     punctuationTargets.forEach((element) => {
+      if (element.closest('[data-natural-copy]')) return;
+
       const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
       const textNodes = [];
       while (walker.nextNode()) textNodes.push(walker.currentNode);
