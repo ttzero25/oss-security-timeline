@@ -134,7 +134,8 @@
     .feature-row > * { padding: 19px 21px; }
     .feature-row b { font-size: 14px; }
     .feature-row p { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.65; }
-    .status { justify-self: start; border-radius: 999px; background: var(--accent-soft); color: var(--accent-2); font-size: 10px; font-weight: 900; white-space: nowrap; }
+    .feature-row .status { display: inline-flex; align-items: center; gap: 5px; justify-self: start; margin: 16px 21px; padding: 4px 8px; border-radius: 7px; background: var(--accent-soft); color: var(--accent-2); font-size: 10px; font-weight: 900; line-height: 1.2; white-space: nowrap; }
+    .feature-row .status::before { content: ""; width: 5px; height: 5px; flex: 0 0 5px; border-radius: 50%; background: currentColor; opacity: .72; }
 
     .pipeline { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
     .pipeline article { position: relative; min-height: 156px; padding: 21px; border: 1px solid var(--line); border-radius: 15px; background: var(--paper); }
@@ -203,7 +204,7 @@
       .proposal-summary, .scope-layout { grid-template-columns: 1fr; }
       .grid-3 { grid-template-columns: 1fr 1fr; }
       .feature-row { grid-template-columns: 155px 1fr; }
-      .feature-row .status { grid-column: 2; padding-top: 0; }
+      .feature-row .status { grid-column: 2; margin-top: 0; }
       .pipeline, .roadmap { grid-template-columns: 1fr 1fr; }
       .pipeline article:nth-child(2)::after { display: none; }
       .roadmap::before { display: none; }
@@ -226,7 +227,7 @@
       .feature-row { grid-template-columns: 1fr; }
       .feature-row > * { padding-bottom: 0; }
       .feature-row > *:last-child { padding-bottom: 18px; }
-      .feature-row .status { grid-column: 1; }
+      .feature-row .status { grid-column: 1; margin: 10px 21px 0; }
       .pipeline article::after { display: none; }
       .snapshot { grid-template-columns: 1fr 1fr; }
       .safety-banner { grid-template-columns: 1fr; }
@@ -513,6 +514,45 @@ http://127.0.0.1:8765/</code></div>
       root.dataset.theme = root.dataset.theme === 'dark' ? 'light' : 'dark';
       localStorage.setItem('proposal-theme', root.dataset.theme);
       button.textContent = root.dataset.theme === 'dark' ? '☀' : '☾';
+    });
+
+    const punctuationTargets = document.querySelectorAll([
+      '.hero-copy',
+      '.summary-main p',
+      '.section-head p',
+      '.card p',
+      '.scope-box li',
+      '.feature-row p',
+      '.pipeline p',
+      '.snapshot-note',
+      '.safety-banner p',
+      '.phase-card p',
+      '.phase-card li',
+      '.metric-table td',
+      '.risk p',
+      '.decision p',
+      '.decision-list span',
+      'footer .wrap'
+    ].join(','));
+
+    punctuationTargets.forEach((element) => {
+      const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+      const textNodes = [];
+      while (walker.nextNode()) textNodes.push(walker.currentNode);
+
+      textNodes.forEach((node) => {
+        const parts = node.nodeValue.split(/([.,])\s+/);
+        if (parts.length === 1) return;
+        const fragment = document.createDocumentFragment();
+        parts.forEach((part) => {
+          if (part === '.' || part === ',') {
+            fragment.append(part, document.createElement('br'));
+          } else if (part) {
+            fragment.append(part);
+          }
+        });
+        node.replaceWith(fragment);
+      });
     });
   </script>
 </body>
