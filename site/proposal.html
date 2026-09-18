@@ -1,0 +1,515 @@
+<!doctype html>
+<html lang="ko" data-theme="light">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow">
+  <meta name="description" content="OSS Security Timeline 프로젝트 제안서">
+  <title>프로젝트 제안서 · OSS Security Timeline</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f2f6f4;
+      --paper: #ffffff;
+      --paper-2: #eaf2ee;
+      --text: #17231f;
+      --muted: #607169;
+      --line: #d3dfd9;
+      --accent: #2f7759;
+      --accent-2: #225b44;
+      --accent-soft: #dcece4;
+      --warning: #9a6328;
+      --warning-soft: #f7ead8;
+      --danger: #a84747;
+      --shadow: 0 18px 55px rgba(24, 50, 39, .08);
+      font-family: Pretendard, "Apple SD Gothic Neo", "Noto Sans KR", Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    html[data-theme="dark"] {
+      color-scheme: dark;
+      --bg: #0c1210;
+      --paper: #121c18;
+      --paper-2: #182821;
+      --text: #edf5f1;
+      --muted: #a0b2a9;
+      --line: #2a4036;
+      --accent: #78c7a5;
+      --accent-2: #a9dcc5;
+      --accent-soft: #1d372d;
+      --warning: #e1ad6e;
+      --warning-soft: #3c2d1e;
+      --danger: #e28b8b;
+      --shadow: 0 18px 55px rgba(0, 0, 0, .22);
+    }
+
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body { margin: 0; background: var(--bg); color: var(--text); }
+    a { color: inherit; }
+    button { font: inherit; }
+    .wrap { width: min(1180px, calc(100% - 48px)); margin: 0 auto; }
+
+    .topbar {
+      position: sticky;
+      top: 0;
+      z-index: 20;
+      border-bottom: 1px solid color-mix(in srgb, var(--line) 84%, transparent);
+      background: color-mix(in srgb, var(--bg) 88%, transparent);
+      backdrop-filter: blur(16px);
+    }
+
+    .topbar .wrap {
+      min-height: 70px;
+      display: flex;
+      align-items: center;
+      gap: 20px;
+    }
+
+    .brand { display: flex; align-items: center; gap: 10px; text-decoration: none; font-weight: 850; white-space: nowrap; }
+    .brand-mark { width: 25px; height: 25px; display: grid; place-items: center; border: 1px solid var(--accent); color: var(--accent); transform: rotate(45deg); }
+    .brand-mark span { transform: rotate(-45deg); font-size: 10px; }
+    nav { display: flex; align-items: center; gap: 3px; margin-left: auto; }
+    nav a { padding: 9px 10px; border-radius: 8px; color: var(--muted); text-decoration: none; font-size: 12px; font-weight: 750; }
+    nav a:hover { background: var(--accent-soft); color: var(--accent-2); }
+    .actions { display: flex; gap: 7px; }
+    .icon-button { min-width: 36px; height: 36px; padding: 0 10px; border: 1px solid var(--line); border-radius: 9px; background: var(--paper); color: var(--text); cursor: pointer; }
+
+    main { padding-bottom: 70px; }
+    section { scroll-margin-top: 94px; }
+    .hero { position: relative; overflow: hidden; padding: 82px 0 62px; border-bottom: 1px solid var(--line); }
+    .hero::after { content: ""; position: absolute; width: 480px; height: 480px; right: -170px; top: -220px; border-radius: 50%; background: radial-gradient(circle, color-mix(in srgb, var(--accent) 20%, transparent), transparent 68%); pointer-events: none; }
+    .kicker { display: inline-flex; align-items: center; gap: 9px; margin-bottom: 20px; color: var(--accent-2); font-size: 11px; font-weight: 900; letter-spacing: .16em; }
+    .kicker::before { content: ""; width: 22px; height: 2px; background: var(--accent); }
+    .hero h1 { max-width: 870px; margin: 0; font-size: clamp(43px, 6vw, 78px); line-height: 1.03; letter-spacing: -.06em; }
+    .hero h1 em { color: var(--accent); font-style: normal; }
+    .hero-copy { max-width: 760px; margin: 25px 0 0; color: var(--muted); font-size: 17px; line-height: 1.8; }
+    .meta-row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 30px; }
+    .meta-row span { padding: 8px 11px; border: 1px solid var(--line); border-radius: 999px; background: var(--paper); color: var(--muted); font-size: 11px; font-weight: 750; }
+
+    .proposal-summary { display: grid; grid-template-columns: 1.2fr .8fr; gap: 16px; margin-top: 34px; }
+    .summary-main, .summary-side { border: 1px solid var(--line); border-radius: 18px; background: var(--paper); box-shadow: var(--shadow); }
+    .summary-main { padding: 28px; }
+    .summary-main h2 { margin: 0 0 13px; font-size: 24px; letter-spacing: -.035em; }
+    .summary-main p { margin: 0; color: var(--muted); line-height: 1.75; }
+    .summary-side { display: grid; grid-template-columns: 1fr 1fr; overflow: hidden; }
+    .summary-side div { padding: 22px; border-left: 1px solid var(--line); }
+    .summary-side div:first-child { border-left: 0; }
+    .summary-side span { display: block; color: var(--muted); font-size: 10px; font-weight: 850; letter-spacing: .1em; }
+    .summary-side strong { display: block; margin-top: 9px; color: var(--accent-2); font-size: 17px; line-height: 1.45; }
+
+    .section { padding: 72px 0 0; }
+    .section-head { display: grid; grid-template-columns: 190px 1fr; gap: 34px; margin-bottom: 26px; }
+    .section-index { color: var(--accent); font-size: 11px; font-weight: 900; letter-spacing: .16em; }
+    .section-head h2 { margin: 0 0 10px; font-size: clamp(28px, 3.6vw, 43px); letter-spacing: -.05em; }
+    .section-head p { max-width: 760px; margin: 0; color: var(--muted); line-height: 1.75; }
+
+    .grid-3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 13px; }
+    .grid-2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 13px; }
+    .card { min-width: 0; padding: 24px; border: 1px solid var(--line); border-radius: 16px; background: var(--paper); }
+    .card-number { display: inline-grid; place-items: center; width: 31px; height: 31px; border-radius: 9px; background: var(--accent-soft); color: var(--accent-2); font-size: 11px; font-weight: 900; }
+    .card h3 { margin: 18px 0 9px; font-size: 18px; letter-spacing: -.025em; }
+    .card p { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.7; }
+    .card ul { margin: 15px 0 0; padding-left: 18px; color: var(--muted); font-size: 13px; line-height: 1.85; }
+
+    .problem-card { border-top: 3px solid var(--line); }
+    .problem-card:nth-child(1) { border-top-color: #c98567; }
+    .problem-card:nth-child(2) { border-top-color: #d1ad52; }
+    .problem-card:nth-child(3) { border-top-color: var(--accent); }
+
+    .scope-layout { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+    .scope-box { padding: 26px; border: 1px solid var(--line); border-radius: 17px; background: var(--paper); }
+    .scope-box h3 { margin: 0 0 18px; font-size: 19px; }
+    .scope-box ul { list-style: none; padding: 0; margin: 0; }
+    .scope-box li { position: relative; padding: 12px 0 12px 28px; border-top: 1px solid var(--line); color: var(--muted); font-size: 13px; line-height: 1.55; }
+    .scope-box li:first-child { border-top: 0; }
+    .scope-box.in li::before { content: "✓"; position: absolute; left: 2px; color: var(--accent); font-weight: 900; }
+    .scope-box.out li::before { content: "—"; position: absolute; left: 4px; color: var(--warning); font-weight: 900; }
+
+    .feature-table { overflow: hidden; border: 1px solid var(--line); border-radius: 17px; background: var(--paper); }
+    .feature-row { display: grid; grid-template-columns: 190px 1fr 170px; align-items: start; border-top: 1px solid var(--line); }
+    .feature-row:first-child { border-top: 0; }
+    .feature-row > * { padding: 19px 21px; }
+    .feature-row b { font-size: 14px; }
+    .feature-row p { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.65; }
+    .status { justify-self: start; border-radius: 999px; background: var(--accent-soft); color: var(--accent-2); font-size: 10px; font-weight: 900; white-space: nowrap; }
+
+    .pipeline { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
+    .pipeline article { position: relative; min-height: 156px; padding: 21px; border: 1px solid var(--line); border-radius: 15px; background: var(--paper); }
+    .pipeline article::after { content: "→"; position: absolute; right: -11px; top: 50%; z-index: 2; width: 21px; height: 21px; display: grid; place-items: center; border-radius: 50%; background: var(--accent); color: var(--paper); font-size: 11px; transform: translateY(-50%); }
+    .pipeline article:last-child::after { display: none; }
+    .pipeline small { color: var(--accent); font-size: 9px; font-weight: 900; letter-spacing: .14em; }
+    .pipeline h3 { margin: 15px 0 8px; font-size: 16px; }
+    .pipeline p { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.6; }
+
+    .architecture-frame { overflow: hidden; border: 1px solid var(--line); border-radius: 18px; background: var(--paper); box-shadow: var(--shadow); }
+    .architecture-bar { display: flex; justify-content: space-between; align-items: center; gap: 14px; padding: 13px 16px; border-bottom: 1px solid var(--line); background: var(--paper-2); }
+    .architecture-bar b { font-size: 12px; }
+    .architecture-bar a { color: var(--accent-2); font-size: 11px; font-weight: 850; text-decoration: none; }
+    .architecture-frame iframe { display: block; width: 100%; height: 760px; border: 0; background: #f8fafc; }
+
+    .snapshot { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; }
+    .snapshot article { padding: 20px; border: 1px solid var(--line); border-radius: 14px; background: var(--paper); }
+    .snapshot span, .snapshot small { display: block; color: var(--muted); font-size: 10px; line-height: 1.45; }
+    .snapshot strong { display: block; margin: 10px 0 8px; font-size: 27px; letter-spacing: -.04em; }
+    .snapshot-note { margin: 12px 0 0; color: var(--muted); font-size: 11px; line-height: 1.65; }
+
+    .safety-banner { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 22px; margin-bottom: 13px; padding: 22px 24px; border: 1px solid color-mix(in srgb, var(--warning) 45%, var(--line)); border-radius: 16px; background: var(--warning-soft); }
+    .safety-banner h3 { margin: 0 0 7px; font-size: 18px; }
+    .safety-banner p { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.65; }
+    .safety-banner strong { color: var(--warning); font-size: 12px; white-space: nowrap; }
+
+    .roadmap { position: relative; display: grid; grid-template-columns: repeat(4, 1fr); gap: 13px; }
+    .roadmap::before { content: ""; position: absolute; left: 8%; right: 8%; top: 20px; height: 1px; background: var(--line); }
+    .phase { position: relative; padding-top: 49px; }
+    .phase::before { content: ""; position: absolute; top: 13px; left: 21px; z-index: 2; width: 15px; height: 15px; border: 5px solid var(--bg); border-radius: 50%; background: var(--accent); }
+    .phase-card { height: 100%; padding: 21px; border: 1px solid var(--line); border-radius: 15px; background: var(--paper); }
+    .phase-card small { color: var(--accent); font-size: 9px; font-weight: 900; letter-spacing: .12em; }
+    .phase-card h3 { margin: 12px 0 8px; font-size: 16px; }
+    .phase-card p { margin: 0 0 13px; color: var(--muted); font-size: 12px; line-height: 1.6; }
+    .phase-card ul { margin: 0; padding-left: 17px; color: var(--muted); font-size: 12px; line-height: 1.7; }
+
+    .metric-table { width: 100%; border-collapse: collapse; overflow: hidden; border: 1px solid var(--line); border-radius: 16px; background: var(--paper); }
+    .metric-table th, .metric-table td { padding: 16px 18px; border-bottom: 1px solid var(--line); text-align: left; font-size: 12px; line-height: 1.55; vertical-align: top; }
+    .metric-table th { background: var(--paper-2); color: var(--muted); font-size: 10px; letter-spacing: .08em; }
+    .metric-table tr:last-child td { border-bottom: 0; }
+    .metric-table td:first-child { font-weight: 850; }
+    .metric-table td:nth-child(2) { color: var(--muted); }
+
+    .risk-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 11px; }
+    .risk { display: grid; grid-template-columns: 38px 1fr; gap: 14px; padding: 20px; border: 1px solid var(--line); border-radius: 14px; background: var(--paper); }
+    .risk > span { width: 38px; height: 38px; display: grid; place-items: center; border-radius: 11px; background: var(--warning-soft); color: var(--warning); font-size: 11px; font-weight: 900; }
+    .risk h3 { margin: 0 0 6px; font-size: 15px; }
+    .risk p { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.65; }
+
+    .decision { margin-top: 72px; padding: 34px; border-radius: 20px; background: var(--accent-2); color: #f5fbf8; }
+    .decision .kicker { color: #c9eadb; }
+    .decision .kicker::before { background: #9bd3ba; }
+    .decision h2 { margin: 0; font-size: clamp(29px, 4vw, 45px); letter-spacing: -.045em; }
+    .decision p { max-width: 790px; margin: 15px 0 0; color: #d5e8df; line-height: 1.75; }
+    .decision-list { display: grid; grid-template-columns: repeat(3, 1fr); gap: 9px; margin-top: 25px; }
+    .decision-list div { padding: 16px; border: 1px solid rgba(255,255,255,.2); border-radius: 12px; background: rgba(255,255,255,.06); }
+    .decision-list b { display: block; margin-bottom: 5px; font-size: 13px; }
+    .decision-list span { color: #c8dfd4; font-size: 11px; line-height: 1.55; }
+
+    .quickstart { margin-top: 18px; padding: 22px; border: 1px solid var(--line); border-radius: 15px; background: var(--paper); }
+    .quickstart code { display: block; overflow-x: auto; white-space: pre; color: var(--accent-2); font-family: "SFMono-Regular", Consolas, monospace; font-size: 12px; line-height: 1.8; }
+    footer { padding: 28px 0 45px; border-top: 1px solid var(--line); color: var(--muted); font-size: 11px; line-height: 1.7; }
+
+    @media (max-width: 980px) {
+      nav { display: none; }
+      .proposal-summary, .scope-layout { grid-template-columns: 1fr; }
+      .grid-3 { grid-template-columns: 1fr 1fr; }
+      .feature-row { grid-template-columns: 155px 1fr; }
+      .feature-row .status { grid-column: 2; padding-top: 0; }
+      .pipeline, .roadmap { grid-template-columns: 1fr 1fr; }
+      .pipeline article:nth-child(2)::after { display: none; }
+      .roadmap::before { display: none; }
+      .snapshot { grid-template-columns: repeat(3, 1fr); }
+    }
+
+    @media (max-width: 650px) {
+      .wrap { width: min(100% - 28px, 1180px); }
+      .topbar .wrap { min-height: 62px; }
+      .brand { font-size: 13px; }
+      .actions .print { display: none; }
+      .hero { padding-top: 56px; }
+      .proposal-summary, .grid-3, .grid-2, .scope-layout, .pipeline, .roadmap, .risk-grid, .decision-list { grid-template-columns: 1fr; }
+      .summary-side { grid-template-columns: 1fr; }
+      .summary-side div { border-left: 0; border-top: 1px solid var(--line); }
+      .summary-side div:first-child { border-top: 0; }
+      .section { padding-top: 55px; }
+      .section-head { grid-template-columns: 1fr; gap: 8px; }
+      .feature-row { grid-template-columns: 1fr; }
+      .feature-row > * { padding-bottom: 0; }
+      .feature-row > *:last-child { padding-bottom: 18px; }
+      .feature-row .status { grid-column: 1; }
+      .pipeline article::after { display: none; }
+      .snapshot { grid-template-columns: 1fr 1fr; }
+      .safety-banner { grid-template-columns: 1fr; }
+      .roadmap .phase { padding-top: 0; }
+      .roadmap .phase::before { display: none; }
+      .metric-table { display: block; overflow-x: auto; }
+      .architecture-frame iframe { height: 520px; }
+    }
+
+    @media print {
+      :root { --bg: #fff; --paper: #fff; --paper-2: #f3f7f5; --text: #111; --muted: #4d5b55; --line: #cfd8d3; --accent: #27674d; --accent-2: #184e39; --accent-soft: #e6f0eb; --shadow: none; }
+      .topbar, .architecture-frame, .actions { display: none !important; }
+      .wrap { width: 100%; }
+      .hero { padding-top: 20px; }
+      .section { padding-top: 42px; }
+      .card, .scope-box, .feature-table, .pipeline article, .phase-card, .risk, .decision, .snapshot article { break-inside: avoid; }
+      .decision { background: #edf5f1; color: #17382b; border: 1px solid #bfd2c8; }
+      .decision p, .decision-list span { color: #415a4f; }
+      .decision-list div { border-color: #bfd2c8; background: transparent; }
+    }
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <div class="wrap">
+      <a class="brand" href="index.html"><span class="brand-mark"><span>ST</span></span>OSS Security Timeline</a>
+      <nav aria-label="제안서 목차">
+        <a href="#background">배경</a>
+        <a href="#solution">제안</a>
+        <a href="#architecture">구조</a>
+        <a href="#roadmap">로드맵</a>
+        <a href="#metrics">성과</a>
+        <a href="#decision">의사결정</a>
+      </nav>
+      <div class="actions">
+        <button class="icon-button" id="theme" type="button" aria-label="밝기 전환">☾</button>
+        <button class="icon-button print" type="button" onclick="window.print()">PDF</button>
+      </div>
+    </div>
+  </header>
+
+  <main>
+    <section class="hero">
+      <div class="wrap">
+        <span class="kicker">PROJECT PROPOSAL · 2026.09</span>
+        <h1>공개 보안 신호를<br><em>검증 가능한 조사 흐름</em>으로.</h1>
+        <p class="hero-copy">OSS Security Timeline은 오픈소스 저장소의 업데이트와 공개 취약점 공지를 하나의 시간축으로 연결하고, 코드 가설을 제한된 PoC로 검증해 사람이 판단할 수 있는 제보 초안까지 만드는 로컬 보안 조사 플랫폼입니다.</p>
+        <div class="meta-row">
+          <span>대상 · 공개 GitHub OSS</span>
+          <span>운영 · 로컬 우선</span>
+          <span>제보 · 사람 최종 승인</span>
+          <span>상태 · 기능 검증 단계</span>
+        </div>
+        <div class="proposal-summary">
+          <article class="summary-main">
+            <h2>제안 요약</h2>
+            <p>분산된 업데이트·공지·코드 근거를 수동으로 맞추는 시간을 줄이고, “후보 발견 → 재현 → 중복 확인 → 근거 판정 → 제보 준비”를 동일한 기록 체계로 표준화합니다. 자동화의 목적은 취약점 확정이나 자동 신고가 아니라, 사람이 더 빠르고 일관되게 검토할 수 있는 증거 묶음을 만드는 것입니다.</p>
+          </article>
+          <aside class="summary-side">
+            <div><span>핵심 산출물</span><strong>OSS별 보안 타임라인과 검증 근거</strong></div>
+            <div><span>최종 통제</span><strong>외부 제출은 항상 사람의 결정</strong></div>
+          </aside>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" id="background">
+      <div class="wrap">
+        <div class="section-head">
+          <span class="section-index">01 · BACKGROUND</span>
+          <div><h2>해결하려는 문제</h2><p>오픈소스 보안 조사는 데이터 부족보다 데이터가 서로 분리되어 있다는 데서 더 큰 비용이 발생합니다.</p></div>
+        </div>
+        <div class="grid-3">
+          <article class="card problem-card"><span class="card-number">01</span><h3>시간축이 분리되어 있음</h3><p>릴리스, 커밋, CVE, GHSA, OSV의 게시·수정·최초 관측 시점이 각기 다른 화면과 형식에 흩어져 있어 사건의 순서를 재구성하기 어렵습니다.</p></article>
+          <article class="card problem-card"><span class="card-number">02</span><h3>탐지와 검증 사이가 끊김</h3><p>정적 패턴은 후보를 만들 수 있지만 실제 외부 도달성, 기본 설정, 공격자 입력 통제와 정상·공격 대조가 없으면 제보 가능한 근거가 되지 못합니다.</p></article>
+          <article class="card problem-card"><span class="card-number">03</span><h3>조사 결과가 재사용되지 않음</h3><p>기존 공지, 과거 보안 변경, fix 전후 코드와 PoC 관측이 한 기록에 남지 않으면 중복 조사와 판단 편차가 반복됩니다.</p></article>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" id="solution">
+      <div class="wrap">
+        <div class="section-head">
+          <span class="section-index">02 · PROPOSAL</span>
+          <div><h2>제안 범위와 원칙</h2><p>공개 정보 수집과 코드 연구를 연결하되, 자동화가 책임 있는 공개의 최종 판단을 대신하지 않도록 경계를 명시합니다.</p></div>
+        </div>
+        <div class="scope-layout">
+          <article class="scope-box in">
+            <h3>제안 범위</h3>
+            <ul>
+              <li>저장소·패키지별 업데이트와 CVE·GHSA·OSV 타임라인</li>
+              <li>공지 별칭 통합, 취약점 유형, 영향·패치 버전 정리</li>
+              <li>공지 참조 커밋의 fix 전후 코드 비교</li>
+              <li>지원 언어의 source-to-sink 코드 가설과 도달성 판정</li>
+              <li>자원 제한 정상/공격 PoC 대조와 재현 증거 보존</li>
+              <li>기존 공지 중복 조사와 GHSA/CVE 비공개 초안 생성</li>
+            </ul>
+          </article>
+          <article class="scope-box out">
+            <h3>의도적으로 제외</h3>
+            <ul>
+              <li>후보 0건을 근거로 한 저장소 안전 판정</li>
+              <li>미공개 제로데이 발생 건수의 단정적 예측</li>
+              <li>모든 언어·프레임워크에 대한 완전 탐지 보장</li>
+              <li>실제 서비스·네트워크·데이터베이스 대상 공격 실행</li>
+              <li>근거 게이트를 건너뛴 취약점 확정</li>
+              <li>GHSA/CVE 외부 제출 또는 식별자 요청 자동화</li>
+            </ul>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="wrap">
+        <div class="section-head">
+          <span class="section-index">03 · USERS</span>
+          <div><h2>누가, 언제 사용하는가</h2><p>반복 수집은 자동화하고 보안 판단은 연구자와 유지관리자에게 남기는 협업 모델을 전제로 합니다.</p></div>
+        </div>
+        <div class="grid-3">
+          <article class="card"><span class="card-number">A</span><h3>보안 연구자</h3><p>관심 저장소를 등록하고 변경·공지·코드 후보를 한 흐름에서 검토하며 재현 가능한 증거를 축적합니다.</p></article>
+          <article class="card"><span class="card-number">B</span><h3>OSS 유지관리자</h3><p>비공개 제보 초안에서 영향 경로, 정상 대조군, 관련 커밋과 중복 조사 내용을 빠르게 확인합니다.</p></article>
+          <article class="card"><span class="card-number">C</span><h3>보안 운영 팀</h3><p>여러 저장소의 공지량·변경량·조사 상태를 비교하고 어떤 대상을 먼저 검토할지 결정합니다.</p></article>
+        </div>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="wrap">
+        <div class="section-head">
+          <span class="section-index">04 · CAPABILITIES</span>
+          <div><h2>핵심 기능</h2><p>현재 저장소에서 실행 가능한 범위를 기준으로 작성했습니다. “구현됨”은 정확성이나 완전 탐지를 보장한다는 의미가 아닙니다.</p></div>
+        </div>
+        <div class="feature-table">
+          <div class="feature-row"><b>공개 데이터 추적</b><p>릴리스·커밋·저장소 및 패키지 보안 공지를 수집하고 CVE/GHSA 별칭과 관측 시각을 정규화합니다.</p><span class="status">구현됨</span></div>
+          <div class="feature-row"><b>Fix 전후 비교</b><p>영향·패치 버전과 공지 참조 커밋의 삭제·추가 코드를 연·월 및 파일별로 비교합니다.</p><span class="status">구현됨</span></div>
+          <div class="feature-row"><b>코드 가설 조사</b><p>Python, JavaScript/TypeScript, Go, C/C++ 및 일부 Actions 패턴에서 입력과 위험 동작의 연결 후보를 찾습니다.</p><span class="status">지원 범위 한정</span></div>
+          <div class="feature-row"><b>제한 PoC 검증</b><p>허용된 후보만 정상/공격 입력으로 대조하고 시간·CPU·출력·쓰기 범위를 제한합니다.</p><span class="status">지원 후보 한정</span></div>
+          <div class="feature-row"><b>관계망·요약</b><p>저장소, 패키지, 공지, CVE, CWE, fix 커밋과 코드 후보의 관계 및 OSS별 결과를 탐색합니다.</p><span class="status">구현됨</span></div>
+          <div class="feature-row"><b>제보 준비</b><p>다섯 근거 게이트를 통과한 결과만 GHSA 비공개 제보 초안과 CVE 요청 브리프로 정리합니다.</p><span class="status">수동 제출</span></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" id="architecture">
+      <div class="wrap">
+        <div class="section-head">
+          <span class="section-index">05 · ARCHITECTURE</span>
+          <div><h2>두 레인, 하나의 근거 체계</h2><p>타임라인 레인은 공개 사실을 수집하고, 연구 레인은 코드 가설을 단계별 게이트로 좁힙니다. 두 레인의 결과는 동일한 로컬 데이터와 리포트로 연결됩니다.</p></div>
+        </div>
+        <div class="pipeline" aria-label="조사 흐름 요약">
+          <article><small>STAGE 01</small><h3>수집·정규화</h3><p>패키지, 릴리스, 커밋, CVE·GHSA·OSV를 공통 시간축으로 변환합니다.</p></article>
+          <article><small>STAGE 02</small><h3>가설·도달성</h3><p>지원 코드의 입력 경로와 위험 동작을 찾고 외부 진입점에서의 도달성을 확인합니다.</p></article>
+          <article><small>STAGE 03</small><h3>격리 재현</h3><p>제한된 PoC로 정상·공격 대조를 수행하고 실제 관측과 차단 이유를 기록합니다.</p></article>
+          <article><small>STAGE 04</small><h3>판정·초안</h3><p>중복과 다섯 근거를 검토해 사람이 제출할 비공개 제보 자료를 만듭니다.</p></article>
+        </div>
+        <div class="architecture-frame" style="margin-top:16px">
+          <div class="architecture-bar"><b>12개 에이전트 실행 관계</b><a href="agent-architecture.html" target="_blank" rel="noopener">전체 화면 ↗</a></div>
+          <iframe src="agent-architecture.html?embed=1" title="OSS Security Timeline 멀티에이전트 실행 구조" loading="lazy"></iframe>
+        </div>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="wrap">
+        <div class="section-head">
+          <span class="section-index">06 · CURRENT STATE</span>
+          <div><h2>현재 검증 스냅샷</h2><p>공개 프리뷰에 반영된 로컬 집계로, 제품 성능 목표나 실시간 운영 수치가 아닙니다.</p></div>
+        </div>
+        <div class="snapshot">
+          <article><span>추적 저장소</span><strong>10</strong><small>수집된 공개 OSS</small></article>
+          <article><span>고유 보안 공지</span><strong>1,459</strong><small>CVE·GHSA 별칭 통합</small></article>
+          <article><span>변경 이벤트</span><strong>62,890</strong><small>릴리스·커밋 기록</small></article>
+          <article><span>코드 검토 후보</span><strong>67</strong><small>취약점 확정 아님</small></article>
+          <article><span>PoC 대조 성공</span><strong>2</strong><small>번들 self-test 포함</small></article>
+        </div>
+        <p class="snapshot-note">기준일 2026-09-17 · 정적 스냅샷 · 후보 수와 PoC 대조 수에는 실제 취약점이 아닌 테스트 또는 검토 대상이 포함될 수 있습니다.</p>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="wrap">
+        <div class="section-head">
+          <span class="section-index">07 · SAFETY</span>
+          <div><h2>안전과 책임 있는 공개</h2><p>보안 자동화의 품질은 무엇을 실행하는가뿐 아니라 무엇을 실행하지 않는가로도 평가해야 합니다.</p></div>
+        </div>
+        <div class="safety-banner"><div><h3>후보 ≠ 취약점 ≠ 제로데이</h3><p>정적 가설과 기계적 PoC 대조만으로 취약점을 확정하지 않습니다. 도달성, 기본 설정, 공격자 통제, 영향, 신규성과 사람의 코드 검토가 필요합니다.</p></div><strong>HUMAN-IN-THE-LOOP</strong></div>
+        <div class="grid-3">
+          <article class="card"><span class="card-number">01</span><h3>실행 격리</h3><p>자원 제한 프로세스, 임시 scratch, 네트워크·DB 스텁, 해시 확인과 의존성 자동 설치 금지로 재현 범위를 좁힙니다.</p></article>
+          <article class="card"><span class="card-number">02</span><h3>증거 게이트</h3><p>재현 성공만 보지 않고 기존 공지와 과거 변경을 함께 검토하며 근거가 부족하거나 오래된 스냅샷이면 초안을 차단합니다.</p></article>
+          <article class="card"><span class="card-number">03</span><h3>수동 공개</h3><p>시스템은 GHSA/CVE 초안만 만들고 제출·식별자 요청·대외 커뮤니케이션은 담당자가 직접 수행합니다.</p></article>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" id="roadmap">
+      <div class="wrap">
+        <div class="section-head">
+          <span class="section-index">08 · ROADMAP</span>
+          <div><h2>단계별 추진안</h2><p>기간을 먼저 고정하기보다 각 단계의 종료 조건을 충족한 뒤 다음 범위로 확장하는 방식을 제안합니다.</p></div>
+        </div>
+        <div class="roadmap">
+          <article class="phase"><div class="phase-card"><small>PHASE 0 · CURRENT</small><h3>기능 기반 확보</h3><p>수집부터 제보 초안까지 단일 흐름과 로컬 웹을 검증합니다.</p><ul><li>타임라인·코드 조사 연결</li><li>12개 역할 분리</li><li>안전 게이트와 회귀 테스트</li></ul></div></article>
+          <article class="phase"><div class="phase-card"><small>PHASE 1 · RELIABILITY</small><h3>신뢰도와 관측성</h3><p>실패·누락·상한을 사용자가 바로 판별하도록 만듭니다.</p><ul><li>수집 신선도·coverage 지표</li><li>rate limit·재개 안정성</li><li>근거 완전성 검사 강화</li></ul></div></article>
+          <article class="phase"><div class="phase-card"><small>PHASE 2 · COLLABORATION</small><h3>팀 검토 체계</h3><p>로컬 결과를 팀이 일관된 절차로 검토하도록 표준화합니다.</p><ul><li>검토 상태·승인 이력</li><li>재현 번들 내보내기</li><li>역할 기반 운영 가이드</li></ul></div></article>
+          <article class="phase"><div class="phase-card"><small>PHASE 3 · COVERAGE</small><h3>지원 범위 확장</h3><p>벤치마크 근거가 확보된 언어와 취약점 유형부터 확장합니다.</p><ul><li>실제 공개 사례 평가 확대</li><li>프레임워크별 의미 모델</li><li>우선순위 모델 보정</li></ul></div></article>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" id="metrics">
+      <div class="wrap">
+        <div class="section-head">
+          <span class="section-index">09 · SUCCESS METRICS</span>
+          <div><h2>성과를 어떻게 측정할 것인가</h2><p>“취약점 수” 하나로 평가하면 과잉 탐지를 유도할 수 있으므로 운영 품질, 근거 품질, 연구 효율을 함께 봅니다.</p></div>
+        </div>
+        <table class="metric-table">
+          <thead><tr><th>영역</th><th>측정 방법</th><th>제안 종료 기준</th></tr></thead>
+          <tbody>
+            <tr><td>수집 신뢰도</td><td>성공·부분 완료·상한 도달·rate limit을 분리 집계</td><td>모든 실행에 coverage와 중단 이유 기록</td></tr>
+            <tr><td>탐지 회귀</td><td>버전 관리된 취약/정상 코퍼스와 고정 커밋 실제 사례 평가</td><td>기존 지원 사례의 회귀 0건</td></tr>
+            <tr><td>재현 품질</td><td>정상·공격 대조, 실행 범위, 대상 해시와 관측 결과 확인</td><td>승격 후보의 증거 필드 누락 0건</td></tr>
+            <tr><td>오탐 관리</td><td>도달성 실패, 중복, 미지원, 영향 부족 사유별 차단률</td><td>차단 근거 없는 제보 초안 0건</td></tr>
+            <tr><td>검토 효율</td><td>후보 생성부터 사람의 검토 완료까지 중앙값 측정</td><td>파일럿 기준선 확보 후 단계별 개선</td></tr>
+            <tr><td>공개 안전성</td><td>외부 자동 요청 및 자동 제출 여부 감사</td><td>자동 제출 0건, 모든 제출에 사람 승인 기록</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="wrap">
+        <div class="section-head">
+          <span class="section-index">10 · RISKS</span>
+          <div><h2>주요 위험과 대응</h2><p>기술적 한계와 운영 리스크를 사전에 문서화하고 결과 화면에 그대로 노출합니다.</p></div>
+        </div>
+        <div class="risk-grid">
+          <article class="risk"><span>R1</span><div><h3>API 제한과 과거 이력 누락</h3><p>인증·증분 수집·캐시를 사용하고 상한에 도달한 실행은 완료가 아닌 부분 결과로 표시합니다.</p></div></article>
+          <article class="risk"><span>R2</span><div><h3>정적 분석의 오탐·미탐</h3><p>지원 범위를 명시하고 도달성·PoC·중복 검토를 분리해 단일 신호가 제보로 직행하지 못하게 합니다.</p></div></article>
+          <article class="risk"><span>R3</span><div><h3>PoC 실행의 부작용</h3><p>로컬 격리, 자원 제한, 네트워크·DB 스텁, scratch 쓰기와 허용 목록으로 실제 외부 효과를 차단합니다.</p></div></article>
+          <article class="risk"><span>R4</span><div><h3>자동화 결과의 과신</h3><p>후보·재현·확정 상태를 구분하고 사람이 확인해야 할 질문과 미확인 범위를 보고서에 남깁니다.</p></div></article>
+        </div>
+      </div>
+    </section>
+
+    <section class="wrap decision" id="decision">
+      <span class="kicker">DECISION REQUEST</span>
+      <h2>제안하는 다음 결정</h2>
+      <p>이 프로젝트를 “자동 취약점 판정기”가 아니라 “공개 신호와 코드 근거를 연결하는 조사 워크벤치”로 정의하고, 제한된 저장소 집합에서 운영 지표와 검토 효율을 먼저 측정하는 파일럿을 진행합니다.</p>
+      <div class="decision-list">
+        <div><b>파일럿 범위 승인</b><span>지원 언어와 중요 OSS 저장소를 제한해 반복 운영</span></div>
+        <div><b>검토 책임 지정</b><span>PoC·근거·중복·외부 제출의 사람 승인자 정의</span></div>
+        <div><b>단계 종료 기준 합의</b><span>수집 신뢰도와 근거 완전성을 충족한 뒤 범위 확장</span></div>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="wrap">
+        <div class="section-head">
+          <span class="section-index">APPENDIX · QUICK START</span>
+          <div><h2>현재 구현 확인</h2><p>추가 패키지 없이 Python 3.11 이상 환경에서 로컬 웹을 실행할 수 있습니다.</p></div>
+        </div>
+        <div class="quickstart"><code>git clone https://github.com/ttzero25/oss-security-timeline.git
+cd oss-security-timeline
+python3 tools/web.py --port 8765
+
+# 브라우저
+http://127.0.0.1:8765/</code></div>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <div class="wrap">OSS Security Timeline 프로젝트 제안서 · 코드 후보와 PoC 대조는 취약점 확정 결과가 아닙니다. 외부 제보와 CVE/GHSA 요청은 사람이 검토하고 직접 수행합니다.</div>
+  </footer>
+
+  <script>
+    const root = document.documentElement;
+    const button = document.getElementById('theme');
+    const saved = localStorage.getItem('proposal-theme');
+    if (saved === 'dark' || saved === 'light') root.dataset.theme = saved;
+    button.textContent = root.dataset.theme === 'dark' ? '☀' : '☾';
+    button.addEventListener('click', () => {
+      root.dataset.theme = root.dataset.theme === 'dark' ? 'light' : 'dark';
+      localStorage.setItem('proposal-theme', root.dataset.theme);
+      button.textContent = root.dataset.theme === 'dark' ? '☀' : '☾';
+    });
+  </script>
+</body>
+</html>
