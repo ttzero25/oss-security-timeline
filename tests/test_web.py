@@ -19,6 +19,16 @@ class DashboardTests(unittest.TestCase):
             self.assertIn('title="낮과 밤 밝기 전환">☾</button>', rendered)
             self.assertIn('src="/theme.js"', rendered)
 
+    def test_home_separates_local_and_team_totals(self):
+        with tempfile.TemporaryDirectory() as temp:
+            report, stats = snapshot(Path(temp) / "db.sqlite3")
+            aggregate = {"schema_version": 1, "counts": {"contributors": 3, "repositories": 7, "advisories": 11, "candidates": 5, "contrasts": 2}}
+            rendered = home(report, stats, [], [], aggregate)
+            self.assertIn("팀 누적", rendered)
+            self.assertIn("참여 환경", rendered)
+            self.assertIn("중앙 집계 · 식별자 기준 중복 제거", rendered)
+            self.assertIn("<strong>11</strong>", rendered)
+
     def test_lab_shows_cve_cwe_and_before_after_versions(self):
         with tempfile.TemporaryDirectory() as temp:
             store = Store(Path(temp) / "db.sqlite3")

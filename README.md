@@ -122,6 +122,9 @@ python3 -m oss_timeline research-replay \
 | `disclosure` | 검증 근거로 GHSA/CVE 초안 생성 |
 | `report-status` | 사람의 제보 처리 상태 조회 |
 | `report-mark` | 검토·제출·접수 결과를 로컬에 기록 |
+| `aggregate-export` | 중앙 집계용 비민감·멱등 번들 생성 |
+| `aggregate-push` | 인증된 중앙 집계 서버로 번들 전송 |
+| `aggregate-stats` | 식별자 기준으로 합쳐진 팀 누적 통계 조회 |
 | `benchmark` | 버전 관리된 로컬 코퍼스의 정적 탐지 회귀 측정 |
 | `benchmark-upstream` | 공개 사례의 고정 커밋 전체 저장소에서 정적 탐지 평가 |
 
@@ -131,6 +134,34 @@ python3 -m oss_timeline research-replay \
 python3 -m oss_timeline --help
 python3 -m oss_timeline research-run --help
 ```
+
+## 여러 로컬 환경의 팀 누적
+
+기본 웹은 각 컴퓨터의 `data/timeline.sqlite3`와 `data/research/`만 읽습니다. 여러 팀원의 결과를 합치려면 한 환경에 중앙 수집 서버를 실행하고 HTTPS 역방향 프록시 뒤에 둡니다. 내장 서버를 인터넷에 직접 노출하지 마세요.
+
+중앙 환경에서 24자 이상의 업로드 토큰을 설정하고 수집기를 실행합니다.
+
+```sh
+export OSS_TIMELINE_AGGREGATE_TOKEN='별도로 생성한 긴 무작위 토큰'
+python3 tools/aggregate_server.py --host 127.0.0.1 --port 8787
+```
+
+각 팀원은 동일한 HTTPS 주소와 토큰으로 로컬 웹을 시작합니다.
+
+```sh
+export OSS_TIMELINE_AGGREGATE_URL='https://aggregate.example.org'
+export OSS_TIMELINE_AGGREGATE_TOKEN='중앙 서버와 공유한 토큰'
+python3 tools/web.py --port 8765 --aggregate-url "$OSS_TIMELINE_AGGREGATE_URL"
+```
+
+웹 조사가 완료되면 중앙 반영을 자동 시도하고 Home에 로컬 누적과 팀 누적을 분리해서 표시합니다. 수동 전송과 조회도 가능합니다.
+
+```sh
+python3 -m oss_timeline aggregate-push --url "$OSS_TIMELINE_AGGREGATE_URL"
+python3 -m oss_timeline aggregate-stats --url "$OSS_TIMELINE_AGGREGATE_URL"
+```
+
+중앙 집계는 저장소, 패키지, CVE·GHSA 별칭, 공개 변경 ID, 저장소·커밋별 조사 실행과 해시된 후보 ID를 병합합니다. 같은 결과를 다시 보내도 한 번만 반영됩니다. 공개 통계 API는 총계만 반환하며 소스 코드, 로컬 경로, PoC 내용, 증거 파일과 GHSA/CVE 제보 초안은 번들에 포함하지 않습니다. 번들 내용은 `aggregate-export`로 전송 전에 직접 확인할 수 있습니다.
 
 ## 수동 PoC와 제보 초안
 
@@ -190,6 +221,8 @@ python3 -m oss_timeline benchmark-upstream --max-files 20000
 | `data/fix-comparisons/` | 공지가 참조한 커밋의 전후 코드 |
 | `data/benchmarks/` | 최근 벤치마크 결과 |
 | `data/web-jobs.json` | 웹 작업과 재개 상태 |
+| `data/aggregate-instance-id` | 중앙 중복 제거용 익명 로컬 설치 ID |
+| `data/aggregate.sqlite3` | 중앙 수집 서버를 실행한 환경의 팀 집계 DB |
 
 웹 수집은 기본적으로 API 페이지와 매니페스트를 각각 최대 100개, 공지 참조 커밋을 최대 5개까지 처리합니다. 두 번째 관측부터는 마지막 동기화 이후 커밋만 요청해 API 사용량을 줄입니다. 첫 수집의 과거 이력이 잘렸다면 완료로 표시하지 않고 경고를 유지합니다.
 

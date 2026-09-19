@@ -3,10 +3,12 @@ from __future__ import annotations
 import argparse
 import html
 import json
+import os
 import sys
 import time
 from pathlib import Path
 
+from .aggregate import build_bundle, fetch_stats, push_bundle
 from .benchmark import benchmark_passes, run_benchmark, run_upstream_benchmark
 from .core import ApiError, HttpClient, Store, repo_name, synchronize
 from .research import DisclosureAgent, PocValidatorAgent, ResearchOrchestrator, audit, checkout, mark_submission_status, prepare_poc, submission_status
@@ -114,6 +116,18 @@ def main(argv: list[str] | None = None) -> int:
     report_mark.add_argument("--status", required=True, choices=["reviewed", "submitted", "accepted", "rejected"])
     report_mark.add_argument("--reference", default="", help="제출 URL·티켓·접수 번호 등 사람이 확인한 참조")
     report_mark.add_argument("--note", default="")
+    aggregate_export = commands.add_parser("aggregate-export", help="중앙 집계용 비민감 결과 번들 생성")
+    aggregate_export.add_argument("--output", type=Path, default=Path("data/aggregate-bundle.json"))
+    aggregate_export.add_argument("--research-root", type=Path, default=Path("data/research"))
+    aggregate_export.add_argument("--instance-file", type=Path, default=Path("data/aggregate-instance-id"))
+    aggregate_push = commands.add_parser("aggregate-push", help="중앙 집계 서버로 비민감 결과 전송")
+    aggregate_push.add_argument("--url", default=os.environ.get("OSS_TIMELINE_AGGREGATE_URL", ""))
+    aggregate_push.add_argument("--token-env", default="OSS_TIMELINE_AGGREGATE_TOKEN")
+    aggregate_push.add_argument("--bundle", type=Path)
+    aggregate_push.add_argument("--research-root", type=Path, default=Path("data/research"))
+    aggregate_push.add_argument("--instance-file", type=Path, default=Path("data/aggregate-instance-id"))
+    aggregate_stats = commands.add_parser("aggregate-stats", help="중앙 누적 통계 조회")
+    aggregate_stats.add_argument("--url", default=os.environ.get("OSS_TIMELINE_AGGREGATE_URL", ""))
     args = parser.parse_args(argv)
     if args.command in {"sync", "watch"} and (args.max_pages < 1 or args.max_manifests < 1):
         parser.error("페이지 및 매니페스트 제한은 1 이상이어야 합니다")
@@ -143,6 +157,32 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps({"output": str(args.output), "scope": result["scope"], "metrics": result["metrics"]}, ensure_ascii=False))
             return 0 if (result["metrics"]["pair_pass_rate"] or 0) >= args.min_pair_pass_rate else 2
         except (OSError, ValueError, RuntimeError, KeyError, TypeError, json.JSONDecodeError) as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+    if args.command in {"aggregate-export", "aggregate-push", "aggregate-stats"}:
+        try:
+            if args.command == "aggregate-stats":
+                if not args.url:
+                    raise ValueError("--url 또는 OSS_TIMELINE_AGGREGATE_URL이 필요합니다")
+                print(json.dumps(fetch_stats(args.url), ensure_ascii=False, indent=2))
+                return 0
+            if args.command == "aggregate-push" and args.bundle:
+                bundle = json.loads(args.bundle.read_text(encoding="utf-8"))
+            else:
+                bundle = build_bundle(args.db, args.research_root, args.instance_file)
+            if args.command == "aggregate-export":
+                args.output.parent.mkdir(parents=True, exist_ok=True)
+                temporary = args.output.with_suffix(args.output.suffix + ".tmp")
+                temporary.write_text(json.dumps(bundle, ensure_ascii=False, indent=2), encoding="utf-8")
+                temporary.replace(args.output)
+                print(json.dumps({"output": str(args.output), "bundle_id": bundle["bundle_id"]}, ensure_ascii=False))
+                return 0
+            if not args.url:
+                raise ValueError("--url 또는 OSS_TIMELINE_AGGREGATE_URL이 필요합니다")
+            token = os.environ.get(args.token_env, "")
+            print(json.dumps(push_bundle(args.url, token, bundle), ensure_ascii=False, indent=2))
+            return 0
+        except (OSError, ValueError, RuntimeError, json.JSONDecodeError, KeyError) as exc:
             print(str(exc), file=sys.stderr)
             return 1
     if args.command in {"audit", "research-run", "research-replay", "poc-init", "poc-verify", "disclosure", "report-status", "report-mark"}:

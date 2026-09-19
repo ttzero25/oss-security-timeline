@@ -20,6 +20,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from oss_timeline.core import ApiError, Collection, HttpClient, Store, repo_name, synchronize  # noqa: E402
+from oss_timeline.aggregate import build_bundle, fetch_stats, push_bundle  # noqa: E402
 from oss_timeline.fix import collect_reference_diffs  # noqa: E402
 from oss_timeline.research import ResearchOrchestrator, audit, checkout  # noqa: E402
 
@@ -439,7 +440,7 @@ def weakness_label(item: dict) -> str:
     return ", ".join(values) or "미기재"
 
 
-def home(report: dict, stats: dict, audits: list[dict], agents: list[dict]) -> str:
+def home(report: dict, stats: dict, audits: list[dict], agents: list[dict], aggregate: dict | None = None) -> str:
     hypotheses = sum(len(x["hypotheses"]) for x in audits)
     contrasts = sum(x["poc_contrasts"] for x in audits)
     cards = "".join(f'<article class="agent-card"><span class="lane">{"공개 데이터" if x.get("lane") == "timeline" else "코드 조사"}</span><h3>{esc(x.get("name"))}</h3><p>{esc(AGENT_DESCRIPTIONS.get(x.get("name"), x.get("purpose")))}</p></article>' for x in agents)
@@ -447,8 +448,16 @@ def home(report: dict, stats: dict, audits: list[dict], agents: list[dict]) -> s
     research_recent = [{**x, "url": None, "display": f'연구 · {x.get("kind")} · {x.get("status")}'} for x in report.get("research_timeline", [])]
     recent_items = sorted(public_recent + research_recent, key=lambda item: item.get("at") or "", reverse=True)[:8]
     recent = "".join(f'<li><span>{esc(str(x.get("at") or "")[:10])}</span><div><b>{esc(x.get("repo"))}</b><p>{safe_link(x.get("url"), x.get("display"))}</p></div></li>' for x in recent_items)
+    aggregate_section = ""
+    if aggregate:
+        if aggregate.get("error"):
+            aggregate_section = f'''<section><div class="section-heading"><div><span class="eyebrow">TEAM TOTALS</span><h2>팀 누적</h2></div><p>중앙 집계 연결 오류</p></div><div class="notice subdued">{esc(aggregate["error"])}</div></section>'''
+        else:
+            counts = aggregate.get("counts", {})
+            aggregate_section = f'''<section><div class="section-heading"><div><span class="eyebrow">TEAM TOTALS</span><h2>팀 누적</h2></div><p>중앙 집계 · 식별자 기준 중복 제거</p></div><div class="metrics">{metric("참여 환경", counts.get("contributors", 0), "익명 설치 ID")}{metric("추적 저장소", counts.get("repositories", 0), "팀 전체 고유 OSS")}{metric("고유 보안 공지", counts.get("advisories", 0), "CVE·GHSA 별칭 통합")}{metric("코드 검토 후보", counts.get("candidates", 0), "fixture 제외")}{metric("PoC 대조 성공", counts.get("contrasts", 0), "fixture 제외")}</div></section>'''
     body = f'''<section class="hero"><span class="eyebrow">OPEN SOURCE SECURITY INTELLIGENCE</span><h1>공개 변경부터 검증 가능한<br><em>보안 가설</em>까지.</h1><p>GitHub 저장소의 업데이트와 CVE·GHSA·OSV 공지를 시간순으로 모으고, 코드에서 발견한 후보를 별도의 검증 흐름으로 추적합니다.</p><a class="button" href="/lab">저장소 조사 시작 ↗</a></section>
 <section><div class="section-heading"><div><span class="eyebrow">PROJECT TOTALS</span><h2>누적 탐지</h2></div><p>현재 로컬 데이터 기준 · 샘플 값 없음</p></div><div class="metrics">{metric("추적 저장소", stats["repos"], "수집된 OSS")}{metric("고유 보안 공지", stats["advisories"], "CVE·GHSA 별칭 통합")}{metric("변경 이벤트", stats["events"], "릴리스·커밋")}{metric("코드 검토 후보", hypotheses, "취약점 확정 아님")}{metric("PoC 대조 성공", contrasts, "수동 검토 필요")}</div></section>
+{aggregate_section}
 <section class="split"><div class="panel"><div class="section-heading"><div><span class="eyebrow">ACTIVITY</span><h2>최근 타임라인</h2></div><a href="/summary">전체 보기 ↗</a></div>{'<ul class="activity">' + recent + '</ul>' if recent else empty("아직 수집된 기록이 없습니다. 실험실에서 저장소를 입력하세요.")}</div><div class="panel intro"><span class="eyebrow">HOW IT WORKS</span><h2>두 갈래의 조사 흐름</h2><p>공개 릴리스·커밋과 보안 공지를 수집해 시간축과 순위를 만듭니다. 이어서 소스 코드의 입력 경로와 위험 동작을 검토 가설로 찾습니다.</p><p>가설은 곧 제로데이가 아닙니다. 재현과 중복 공지 검토, 사람의 코드 확인을 거쳐 비공개 제보 초안으로 이어집니다.</p></div></section>
 <section><div class="section-heading"><div><span class="eyebrow">AGENT MAP</span><h2>에이전트 구성</h2></div><p>역할별 Python 모듈 · 변경·공지 수집은 병렬</p></div><div class="agent-grid">{cards}</div></section>'''
     return page("Home", "home", body)
@@ -480,7 +489,10 @@ def lab(selected: str | None, report: dict | None, audits: list[dict], job: dict
         state = "진행 중" if running else "완료" if job["status"] == "complete" else "실패"
         progress = job_progress(job)
         progress_bar = f'''<div class="liquid-progress" role="progressbar" aria-label="조사 진행률" aria-valuemin="0" aria-valuemax="100" aria-valuenow="{progress}" style="--progress:{progress}%"><div class="liquid-fill"></div><span>{progress}%</span></div>'''
-        notice += f'<div class="notice job-status {"running" if running else "complete" if job["status"] == "complete" else "failed"}"><div class="job-status-copy"><b>{esc(job["repo"])} · {state}</b><span>{esc(job["step"] if running else job.get("error") or "수집과 코드 조사가 완료됐습니다.")}</span></div>{progress_bar}</div>'
+        result_note = job["step"] if running else job.get("error") or "수집과 코드 조사가 완료됐습니다."
+        if not running and job.get("aggregate"):
+            result_note += " · " + str(job["aggregate"])
+        notice += f'<div class="notice job-status {"running" if running else "complete" if job["status"] == "complete" else "failed"}"><div class="job-status-copy"><b>{esc(job["repo"])} · {state}</b><span>{esc(result_note)}</span></div>{progress_bar}</div>'
     details = ""
     if selected and report:
         repo_data = report["repositories"][0]
@@ -631,12 +643,29 @@ def summary(report: dict, audits: list[dict], benchmark: dict | None = None, ups
     return page("정리", "summary", body)
 
 
-def serve(port: int, db_path: Path, research_root: Path, registry_path: Path) -> None:
+def serve(port: int, db_path: Path, research_root: Path, registry_path: Path, aggregate_url: str = "", aggregate_token_env: str = "OSS_TIMELINE_AGGREGATE_TOKEN") -> None:
     reconciliation = reconcile_research_runs(db_path, research_root)
     jobs_path = db_path.parent / "web-jobs.json"
     jobs: dict[str, dict] = load_jobs(jobs_path)
     lock = threading.Lock()
     token, auth_source = github_token()
+
+    def publish_aggregate() -> None:
+        if not aggregate_url:
+            return
+        aggregate_token = os.environ.get(aggregate_token_env, "")
+        if not aggregate_token:
+            raise ValueError(f"환경 변수 {aggregate_token_env}에 중앙 집계 토큰이 없습니다")
+        bundle = build_bundle(db_path, research_root, db_path.parent / "aggregate-instance-id")
+        push_bundle(aggregate_url, aggregate_token, bundle)
+
+    def aggregate_snapshot() -> dict | None:
+        if not aggregate_url:
+            return None
+        try:
+            return fetch_stats(aggregate_url)
+        except (ValueError, RuntimeError) as exc:
+            return {"error": str(exc)}
 
     def persist_jobs() -> None:
         jobs_path.parent.mkdir(parents=True, exist_ok=True)
@@ -673,8 +702,13 @@ def serve(port: int, db_path: Path, research_root: Path, registry_path: Path) ->
                 jobs[repo].update(step="코드 가설 우선순위화 및 제한 PoC 대조 중", progress=76)
                 persist_jobs()
             ResearchOrchestrator().run(audit_file, max_candidates=3, timeline_db=db_path)
+            try:
+                publish_aggregate()
+                aggregate_state = "팀 누적 반영 완료" if aggregate_url else "중앙 집계 미설정"
+            except (OSError, ValueError, RuntimeError, json.JSONDecodeError) as exc:
+                aggregate_state = "팀 누적 실패 · " + str(exc)[-200:]
             with lock:
-                jobs[repo].update(status="complete", step="완료", progress=100)
+                jobs[repo].update(status="complete", step="완료", progress=100, aggregate=aggregate_state)
                 persist_jobs()
         except (ApiError, ValueError, RuntimeError, OSError, KeyError) as exc:
             with lock:
@@ -711,8 +745,13 @@ def serve(port: int, db_path: Path, research_root: Path, registry_path: Path) ->
                 persist_jobs()
             audit_file = latest_audit(repo)
             ResearchOrchestrator().run(audit_file, max_candidates=3, timeline_db=db_path, resume=True)
+            try:
+                publish_aggregate()
+                aggregate_state = "팀 누적 반영 완료" if aggregate_url else "중앙 집계 미설정"
+            except (OSError, ValueError, RuntimeError, json.JSONDecodeError) as exc:
+                aggregate_state = "팀 누적 실패 · " + str(exc)[-200:]
             with lock:
-                jobs[repo].update(status="complete", step="이월 후보 검증 완료", error="", progress=100)
+                jobs[repo].update(status="complete", step="이월 후보 검증 완료", error="", progress=100, aggregate=aggregate_state)
                 persist_jobs()
         except (ValueError, RuntimeError, OSError, KeyError) as exc:
             with lock:
@@ -815,7 +854,7 @@ def serve(port: int, db_path: Path, research_root: Path, registry_path: Path) ->
                 if path == "/api/report":
                     self.respond(json.dumps(report, ensure_ascii=False), content_type="application/json; charset=utf-8")
                 elif path == "/":
-                    self.respond(home(report, stats, audits, agent_registry(registry_path)))
+                    self.respond(home(report, stats, audits, agent_registry(registry_path), aggregate_snapshot()))
                 elif path == "/summary":
                     self.respond(summary(report, audits, benchmark_snapshot(db_path.parent / "benchmarks" / "latest.json"), benchmark_snapshot(db_path.parent / "benchmarks" / "upstream-latest.json")))
                 elif path == "/graph":
@@ -884,6 +923,7 @@ def serve(port: int, db_path: Path, research_root: Path, registry_path: Path) ->
     server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     print(f"Local dashboard: http://127.0.0.1:{server.server_port}/", flush=True)
     print(f"GitHub API authentication: {auth_source}", flush=True)
+    print(f"Central aggregation: {aggregate_url or 'disabled'}", flush=True)
     if reconciliation["imported"] or reconciliation["invalid"]:
         print(f'Research history migration: imported={reconciliation["imported"]}, invalid={reconciliation["invalid"]}', flush=True)
     try:
@@ -899,10 +939,12 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--db", type=Path, default=ROOT / "data/timeline.sqlite3")
     parser.add_argument("--research-root", type=Path, default=ROOT / "data/research")
+    parser.add_argument("--aggregate-url", default=os.environ.get("OSS_TIMELINE_AGGREGATE_URL", ""))
+    parser.add_argument("--aggregate-token-env", default="OSS_TIMELINE_AGGREGATE_TOKEN")
     args = parser.parse_args()
     if not 1 <= args.port <= 65535:
         parser.error("port must be between 1 and 65535")
-    serve(args.port, args.db, args.research_root, ROOT / "agents/registry.json")
+    serve(args.port, args.db, args.research_root, ROOT / "agents/registry.json", args.aggregate_url, args.aggregate_token_env)
 
 
 if __name__ == "__main__":
