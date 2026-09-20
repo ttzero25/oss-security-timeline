@@ -42,11 +42,6 @@
       --shadow: 0 18px 55px rgba(0, 0, 0, .22);
     }
 
-    html[data-theme="dark"] .decision { border: 1px solid #315847; background: #17382d; color: #f2faf6; }
-    html[data-theme="dark"] .decision .kicker { color: #a9d8c3; }
-    html[data-theme="dark"] .decision p { color: #c4d9cf; }
-    html[data-theme="dark"] .decision-list div { border-color: #466b5b; background: #1d4436; }
-    html[data-theme="dark"] .decision-list span { color: #bdd6ca; }
 
     * { box-sizing: border-box; }
     html { scroll-behavior: smooth; }
@@ -136,13 +131,11 @@
     .scope-box.out li::before { content: "—"; position: absolute; left: 4px; color: var(--warning); font-weight: 900; }
 
     .feature-table { overflow: hidden; border: 1px solid var(--line); border-radius: 17px; background: var(--paper); }
-    .feature-row { display: grid; grid-template-columns: 190px 1fr 170px; align-items: start; border-top: 1px solid var(--line); }
+    .feature-row { display: grid; grid-template-columns: 190px 1fr; align-items: start; border-top: 1px solid var(--line); }
     .feature-row:first-child { border-top: 0; }
     .feature-row > * { padding: 19px 21px; }
     .feature-row b { font-size: 14px; }
     .feature-row p { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.65; }
-    .feature-row .status { display: inline-flex; align-items: center; gap: 5px; justify-self: start; margin: 16px 21px; padding: 4px 8px; border-radius: 7px; background: var(--accent-soft); color: var(--accent-2); font-size: 10px; font-weight: 900; line-height: 1.2; white-space: nowrap; }
-    .feature-row .status::before { content: ""; width: 5px; height: 5px; flex: 0 0 5px; border-radius: 50%; background: currentColor; opacity: .72; }
 
     .pipeline { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
     .pipeline article { position: relative; min-height: 156px; padding: 21px; border: 1px solid var(--line); border-radius: 15px; background: var(--paper); }
@@ -189,18 +182,10 @@
     .risk-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 11px; }
     .risk { display: grid; grid-template-columns: 38px 1fr; gap: 14px; padding: 20px; border: 1px solid var(--line); border-radius: 14px; background: var(--paper); }
     .risk > span { width: 38px; height: 38px; display: grid; place-items: center; border-radius: 11px; background: var(--warning-soft); color: var(--warning); font-size: 11px; font-weight: 900; }
-    .risk h3 { margin: 0 0 6px; font-size: 15px; }
+    .risk-label { display: block; margin: 0 0 4px; color: var(--warning); font-size: 9px; font-weight: 900; letter-spacing: .12em; }
+    .risk-label.response { margin-top: 12px; color: var(--accent); }
+    .risk h3 { margin: 0; font-size: 15px; }
     .risk p { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.65; }
-
-    .decision { margin-top: 72px; padding: 34px; border-radius: 20px; background: var(--accent-2); color: #f5fbf8; }
-    .decision .kicker { color: #c9eadb; }
-    .decision .kicker::before { background: #9bd3ba; }
-    .decision h2 { margin: 0; font-size: clamp(27px, 3.7vw, 41px); letter-spacing: -.045em; }
-    .decision p { max-width: 790px; margin: 15px 0 0; color: #d5e8df; line-height: 1.75; }
-    .decision-list { display: grid; grid-template-columns: repeat(3, 1fr); gap: 9px; margin-top: 25px; }
-    .decision-list div { padding: 16px; border: 1px solid rgba(255,255,255,.2); border-radius: 12px; background: rgba(255,255,255,.06); }
-    .decision-list b { display: block; margin-bottom: 5px; font-size: 13px; }
-    .decision-list span { color: #c8dfd4; font-size: 11px; line-height: 1.55; }
 
     .quickstart { margin-top: 18px; padding: 22px; border: 1px solid var(--line); border-radius: 15px; background: var(--paper); }
     .quickstart code { display: block; overflow-x: auto; white-space: pre; color: var(--accent-2); font-family: "SFMono-Regular", Consolas, monospace; font-size: 12px; line-height: 1.8; }
@@ -211,7 +196,6 @@
       .proposal-summary, .scope-layout { grid-template-columns: 1fr; }
       .grid-3 { grid-template-columns: 1fr 1fr; }
       .feature-row { grid-template-columns: 155px 1fr; }
-      .feature-row .status { grid-column: 2; margin-top: 0; }
       .pipeline, .roadmap { grid-template-columns: 1fr 1fr; }
       .pipeline article:nth-child(2)::after { display: none; }
       .roadmap::before { display: none; }
@@ -225,7 +209,7 @@
       .actions .print { display: none; }
       .hero { padding-top: 56px; }
       .hero h1 { font-size: clamp(33px, 10vw, 44px); line-height: 1.08; letter-spacing: -.045em; }
-      .proposal-summary, .grid-3, .grid-2, .scope-layout, .pipeline, .roadmap, .risk-grid, .decision-list { grid-template-columns: 1fr; }
+      .proposal-summary, .grid-3, .grid-2, .scope-layout, .pipeline, .roadmap, .risk-grid { grid-template-columns: 1fr; }
       .summary-side { grid-template-columns: 1fr; }
       .summary-side div { border-left: 0; border-top: 1px solid var(--line); }
       .summary-side div:first-child { border-top: 0; }
@@ -235,7 +219,6 @@
       .feature-row { grid-template-columns: 1fr; }
       .feature-row > * { padding-bottom: 0; }
       .feature-row > *:last-child { padding-bottom: 18px; }
-      .feature-row .status { grid-column: 1; margin: 10px 21px 0; }
       .pipeline article::after { display: none; }
       .snapshot { grid-template-columns: 1fr 1fr; }
       .safety-banner { grid-template-columns: 1fr; }
@@ -251,10 +234,7 @@
       .wrap { width: 100%; }
       .hero { padding-top: 20px; }
       .section { padding-top: 42px; }
-      .card, .scope-box, .feature-table, .pipeline article, .phase-card, .risk, .decision, .snapshot article { break-inside: avoid; }
-      .decision { background: #edf5f1; color: #17382b; border: 1px solid #bfd2c8; }
-      .decision p, .decision-list span { color: #415a4f; }
-      .decision-list div { border-color: #bfd2c8; background: transparent; }
+      .card, .scope-box, .feature-table, .pipeline article, .phase-card, .risk, .snapshot article { break-inside: avoid; }
     }
   </style>
 </head>
@@ -264,11 +244,8 @@
       <a class="brand" href="index.html"><span class="brand-mark"><span>ST</span></span>OSS Security Timeline</a>
       <nav aria-label="제안서 목차">
         <a href="#background">배경</a>
-        <a href="#solution">제안</a>
-        <a href="#architecture">구조</a>
         <a href="#roadmap">로드맵</a>
         <a href="#metrics">성과</a>
-        <a href="#decision">의사결정</a>
       </nav>
       <div class="actions">
         <button class="icon-button" id="theme" type="button" aria-label="밝기 전환">☾</button>
@@ -316,43 +293,10 @@
       </div>
     </section>
 
-    <section class="section" id="solution" data-natural-copy>
-      <div class="wrap">
-        <div class="section-head">
-          <span class="section-index">02 · PROPOSAL</span>
-          <div><h2>제안 범위와 원칙</h2><p>공개 정보 수집과 코드 연구를 연결하되, 자동화가 책임 있는 공개의 최종 판단을 대신하지 않도록 경계를 명시합니다.</p></div>
-        </div>
-        <div class="scope-layout">
-          <article class="scope-box in">
-            <h3>제안 범위</h3>
-            <ul>
-              <li>저장소·패키지별 업데이트와 CVE·GHSA·OSV 타임라인</li>
-              <li>공지 별칭 통합, 취약점 유형, 영향·패치 버전 정리</li>
-              <li>공지 참조 커밋의 fix 전후 코드 비교</li>
-              <li>지원 언어의 source-to-sink 코드 가설과 도달성 판정</li>
-              <li>자원 제한 정상/공격 PoC 대조와 재현 증거 보존</li>
-              <li>기존 공지 중복 조사와 GHSA/CVE 비공개 초안 생성</li>
-            </ul>
-          </article>
-          <article class="scope-box out">
-            <h3>의도적으로 제외</h3>
-            <ul>
-              <li>후보 0건을 근거로 한 저장소 안전 판정</li>
-              <li>미공개 제로데이 발생 건수의 단정적 예측</li>
-              <li>모든 언어·프레임워크에 대한 완전 탐지 보장</li>
-              <li>실제 서비스·네트워크·데이터베이스 대상 공격 실행</li>
-              <li>근거 게이트를 건너뛴 취약점 확정</li>
-              <li>GHSA/CVE 외부 제출 또는 식별자 요청 자동화</li>
-            </ul>
-          </article>
-        </div>
-      </div>
-    </section>
-
     <section class="section" data-natural-copy>
       <div class="wrap">
         <div class="section-head">
-          <span class="section-index">03 · USERS</span>
+          <span class="section-index">02 · USERS</span>
           <div><h2>누가, 언제 사용하는가</h2><p>반복 수집은 자동화하고 보안 판단은 연구자와 유지관리자에게 남기는 협업 모델을 전제로 합니다.</p></div>
         </div>
         <div class="grid-3">
@@ -366,35 +310,16 @@
     <section class="section" data-natural-copy>
       <div class="wrap">
         <div class="section-head">
-          <span class="section-index">04 · CAPABILITIES</span>
-          <div><h2>핵심 기능</h2><p>현재 저장소에서 실행 가능한 범위를 기준으로 작성했습니다. “구현됨”은 정확성이나 완전 탐지를 보장한다는 의미가 아닙니다.</p></div>
+          <span class="section-index">03 · CAPABILITIES</span>
+          <div><h2>핵심 기능</h2><p>현재 저장소에서 실행 가능한 범위를 기준으로 작성했습니다.</p></div>
         </div>
         <div class="feature-table">
-          <div class="feature-row"><b>공개 데이터 추적</b><p>릴리스와 커밋, 저장소·패키지 보안 공지를 수집하고 CVE/GHSA 별칭과 관측 시각을 정규화합니다.</p><span class="status">구현됨</span></div>
-          <div class="feature-row"><b>Fix 전후 비교</b><p>영향·패치 버전과 공지 참조 커밋의 삭제·추가 코드를 연도·월·파일별로 비교합니다.</p><span class="status">구현됨</span></div>
-          <div class="feature-row"><b>코드 가설 조사</b><p>Python, JavaScript/TypeScript, Go, C/C++ 및 일부 Actions 패턴에서 외부 입력부터 위험 동작까지 이어지는 코드 경로 후보를 찾습니다.</p><span class="status">지원 범위 한정</span></div>
-          <div class="feature-row"><b>제한 PoC 검증</b><p>허용된 후보만 정상/공격 입력으로 대조하고 시간·CPU·출력·쓰기 범위를 제한합니다.</p><span class="status">지원 후보 한정</span></div>
-          <div class="feature-row"><b>관계망·요약</b><p>저장소, 패키지, 공지, CVE, CWE, fix 커밋과 코드 후보의 관계 및 OSS별 결과를 탐색합니다.</p><span class="status">구현됨</span></div>
-          <div class="feature-row"><b>제보 준비</b><p>다섯 근거 게이트를 통과한 결과만 GHSA 비공개 제보 초안과 CVE 요청 브리프로 정리합니다.</p><span class="status">수동 제출</span></div>
-        </div>
-      </div>
-    </section>
-
-    <section class="section" id="architecture">
-      <div class="wrap">
-        <div class="section-head">
-          <span class="section-index">05 · ARCHITECTURE</span>
-          <div><h2>두 레인, 하나의 근거 체계</h2><p data-natural-copy><span class="sentence-line">타임라인 레인은 공개 사실을 수집하고, 연구 레인은 코드 가설을 단계별 게이트로 좁힙니다.</span>두 레인의 결과는 동일한 로컬 데이터와 리포트로 연결됩니다.</p></div>
-        </div>
-        <div class="pipeline" aria-label="조사 흐름 요약">
-          <article data-natural-copy><small>STAGE 01</small><h3>수집·정규화</h3><p>패키지, 릴리스, 커밋, CVE·GHSA·OSV를 공통 시간축으로 변환합니다.</p></article>
-          <article><small>STAGE 02</small><h3>가설·도달성</h3><p>지원 코드의 입력 경로와 위험 동작을 찾고 외부 진입점에서의 도달성을 확인합니다.</p></article>
-          <article><small>STAGE 03</small><h3>격리 재현</h3><p>제한된 PoC로 정상·공격 대조를 수행하고 실제 관측과 차단 이유를 기록합니다.</p></article>
-          <article><small>STAGE 04</small><h3>판정·초안</h3><p>중복 여부와 다섯 가지 근거를 검토해 사람이 제출할 비공개 제보 자료를 만듭니다.</p></article>
-        </div>
-        <div class="architecture-frame" style="margin-top:16px">
-          <div class="architecture-bar"><b>12개 에이전트 실행 관계</b><a href="agent-architecture.html" target="_blank" rel="noopener">전체 화면 ↗</a></div>
-          <iframe src="agent-architecture.html?embed=1" title="OSS Security Timeline 멀티에이전트 실행 구조" loading="lazy"></iframe>
+          <div class="feature-row"><b>공개 데이터 추적</b><p>릴리스와 커밋, 저장소·패키지 보안 공지를 수집하고 CVE/GHSA 별칭과 관측 시각을 정규화합니다.</p></div>
+          <div class="feature-row"><b>Fix 전후 비교</b><p>영향·패치 버전과 공지 참조 커밋의 삭제·추가 코드를 연도·월·파일별로 비교합니다.</p></div>
+          <div class="feature-row"><b>코드 가설 조사</b><p>Python, JavaScript/TypeScript, Go, C/C++ 및 일부 Actions 패턴에서 외부 입력부터 위험 동작까지 이어지는 코드 경로 후보를 찾습니다.</p></div>
+          <div class="feature-row"><b>제한 PoC 검증</b><p>허용된 후보만 정상/공격 입력으로 대조하고 시간·CPU·출력·쓰기 범위를 제한합니다.</p></div>
+          <div class="feature-row"><b>관계망·요약</b><p>저장소, 패키지, 공지, CVE, CWE, fix 커밋과 코드 후보의 관계 및 OSS별 결과를 탐색합니다.</p></div>
+          <div class="feature-row"><b>제보 준비</b><p>다섯 근거 게이트를 통과한 결과만 GHSA 비공개 제보 초안과 CVE 요청 브리프로 정리합니다.</p></div>
         </div>
       </div>
     </section>
@@ -402,24 +327,7 @@
     <section class="section" data-natural-copy>
       <div class="wrap">
         <div class="section-head">
-          <span class="section-index">06 · CURRENT STATE</span>
-          <div><h2>현재 검증 스냅샷</h2><p>공개 프리뷰에 반영된 로컬 집계로, 제품 성능 목표나 실시간 운영 수치가 아닙니다.</p></div>
-        </div>
-        <div class="snapshot">
-          <article><span>추적 저장소</span><strong>10</strong><small>수집된 공개 OSS</small></article>
-          <article><span>고유 보안 공지</span><strong>1,459</strong><small>CVE·GHSA 별칭 통합</small></article>
-          <article><span>변경 이벤트</span><strong>62,890</strong><small>릴리스·커밋 기록</small></article>
-          <article><span>코드 검토 후보</span><strong>67</strong><small>취약점 확정 아님</small></article>
-          <article><span>PoC 대조 성공</span><strong>2</strong><small>번들 self-test 포함</small></article>
-        </div>
-        <p class="snapshot-note">기준일 2026-09-17 · 정적 스냅샷 · 후보 수와 PoC 대조 수에는 실제 취약점이 아닌 테스트 또는 검토 대상이 포함될 수 있습니다.</p>
-      </div>
-    </section>
-
-    <section class="section" data-natural-copy>
-      <div class="wrap">
-        <div class="section-head">
-          <span class="section-index">07 · SAFETY</span>
+          <span class="section-index">04 · SAFETY</span>
           <div><h2>안전과 책임 있는 공개</h2><p>보안 자동화의 품질은 무엇을 실행하는가뿐 아니라 무엇을 실행하지 않는가로도 평가해야 합니다.</p></div>
         </div>
         <div class="safety-banner"><div><h3>후보 ≠ 취약점 ≠ 제로데이</h3><p>정적 가설과 기계적 PoC 대조만으로 취약점을 확정하지 않습니다. 도달성, 기본 설정, 공격자 통제, 영향과 신규성을 확인한 뒤 사람이 코드를 다시 검토해야 합니다.</p></div><strong>HUMAN-IN-THE-LOOP</strong></div>
@@ -434,7 +342,7 @@
     <section class="section" id="roadmap" data-natural-copy>
       <div class="wrap">
         <div class="section-head">
-          <span class="section-index">08 · ROADMAP</span>
+          <span class="section-index">05 · ROADMAP</span>
           <div><h2>단계별 추진안</h2><p>기간을 먼저 고정하기보다 각 단계의 종료 조건을 충족한 뒤 다음 범위로 확장하는 방식을 제안합니다.</p></div>
         </div>
         <div class="roadmap">
@@ -449,11 +357,11 @@
     <section class="section" id="metrics" data-natural-copy>
       <div class="wrap">
         <div class="section-head">
-          <span class="section-index">09 · SUCCESS METRICS</span>
+          <span class="section-index">06 · SUCCESS METRICS</span>
           <div><h2>성과를 어떻게 측정할 것인가</h2><p>“취약점 수” 하나로 평가하면 과잉 탐지를 유도할 수 있으므로 운영 품질, 근거 품질, 연구 효율을 함께 봅니다.</p></div>
         </div>
         <table class="metric-table">
-          <thead><tr><th>영역</th><th>측정 방법</th><th>제안 종료 기준</th></tr></thead>
+          <thead><tr><th>영역</th><th>측정 방법</th><th>종료 기준</th></tr></thead>
           <tbody>
             <tr><td>수집 신뢰도</td><td>성공·부분 완료·상한 도달·rate limit을 분리 집계</td><td>모든 실행에 coverage와 중단 이유 기록</td></tr>
             <tr><td>탐지 회귀</td><td>버전 관리된 취약/정상 코퍼스와 고정 커밋 실제 사례 평가</td><td>기존 지원 사례의 회귀 0건</td></tr>
@@ -469,26 +377,15 @@
     <section class="section" data-natural-copy>
       <div class="wrap">
         <div class="section-head">
-          <span class="section-index">10 · RISKS</span>
+          <span class="section-index">07 · RISKS</span>
           <div><h2>주요 위험과 대응</h2><p>기술적 한계와 운영 위험을 사전에 문서화하고 결과 화면에 명확히 표시합니다.</p></div>
         </div>
         <div class="risk-grid">
-          <article class="risk"><span>R1</span><div><h3>API 제한과 과거 이력 누락</h3><p>인증·증분 수집·캐시를 사용하고 상한에 도달한 실행은 완료가 아닌 부분 결과로 표시합니다.</p></div></article>
-          <article class="risk"><span>R2</span><div><h3>정적 분석의 오탐·미탐</h3><p>지원 범위를 명시하고 도달성·PoC·중복 검토를 분리해 단일 신호가 제보로 직행하지 못하게 합니다.</p></div></article>
-          <article class="risk"><span>R3</span><div><h3>PoC 실행의 부작용</h3><p>로컬 격리, 자원 제한, 네트워크·DB 스텁, 임시 작업 공간 쓰기와 허용 목록으로 실제 외부 효과를 차단합니다.</p></div></article>
-          <article class="risk"><span>R4</span><div><h3>자동화 결과의 과신</h3><p>후보·재현·확정 상태를 구분하고 사람이 확인해야 할 질문과 미확인 범위를 보고서에 남깁니다.</p></div></article>
+          <article class="risk"><span>R1</span><div><small class="risk-label">위험</small><h3>API 제한과 과거 이력 누락</h3><small class="risk-label response">대응</small><p>인증·증분 수집·캐시를 사용하고 상한에 도달한 실행은 완료가 아닌 부분 결과로 표시합니다.</p></div></article>
+          <article class="risk"><span>R2</span><div><small class="risk-label">위험</small><h3>정적 분석의 오탐·미탐</h3><small class="risk-label response">대응</small><p>지원 범위를 명시하고 도달성·PoC·중복 검토를 분리해 단일 신호가 제보로 직행하지 못하게 합니다.</p></div></article>
+          <article class="risk"><span>R3</span><div><small class="risk-label">위험</small><h3>PoC 실행의 부작용</h3><small class="risk-label response">대응</small><p>로컬 격리, 자원 제한, 네트워크·DB 스텁, 임시 작업 공간 쓰기와 허용 목록으로 실제 외부 효과를 차단합니다.</p></div></article>
+          <article class="risk"><span>R4</span><div><small class="risk-label">위험</small><h3>자동화 결과의 과신</h3><small class="risk-label response">대응</small><p>후보·재현·확정 상태를 구분하고 사람이 확인해야 할 질문과 미확인 범위를 보고서에 남깁니다.</p></div></article>
         </div>
-      </div>
-    </section>
-
-    <section class="wrap decision" id="decision">
-      <span class="kicker">DECISION REQUEST</span>
-      <h2>제안하는 다음 결정</h2>
-      <p>이 프로젝트를 “자동 취약점 판정기”가 아니라 “공개 신호와 코드 근거를 연결하는 조사 워크벤치”로 정의하고, 제한된 저장소 집합에서 운영 지표와 검토 효율을 먼저 측정하는 파일럿을 진행합니다.</p>
-      <div class="decision-list">
-        <div><b>파일럿 범위 승인</b><span>지원 언어와 중요 OSS 저장소를 제한해 반복 운영</span></div>
-        <div><b>검토 책임 지정</b><span>PoC·근거·중복·외부 제출의 사람 승인자 정의</span></div>
-        <div><b>단계 종료 기준 합의</b><span>수집 신뢰도와 근거 완전성을 충족한 뒤 범위 확장</span></div>
       </div>
     </section>
 
@@ -538,8 +435,6 @@ http://127.0.0.1:8765/</code></div>
       '.phase-card li',
       '.metric-table td',
       '.risk p',
-      '.decision p',
-      '.decision-list span',
       'footer .wrap'
     ].join(','));
 
