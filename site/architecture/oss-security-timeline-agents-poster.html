@@ -6,7 +6,7 @@
   <title>OSS Security Timeline · 12개 에이전트 구조도</title>
   <style>
     * { box-sizing: border-box; }
-    html, body { width: 2144px; min-height: 1588px; margin: 0; overflow: hidden; }
+    html, body { width: 2144px; min-height: 2304px; margin: 0; overflow: hidden; }
     body {
       background: #f8fafc;
       color: #17231f;
@@ -40,6 +40,52 @@
       letter-spacing: -.018em;
       word-break: keep-all;
     }
+    .roles {
+      height: 716px;
+      padding: 38px 80px 44px;
+      border-top: 1px solid #dce5e1;
+      background: #f5f8f7;
+    }
+    .roles h2 {
+      margin: 0 0 24px;
+      color: #17231f;
+      font-size: 30px;
+      letter-spacing: -.03em;
+    }
+    .role-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 16px 18px;
+    }
+    .role-card {
+      min-height: 126px;
+      padding: 19px 22px 18px;
+      border: 1px solid #d8e2dd;
+      border-top: 4px solid #24956d;
+      border-radius: 13px;
+      background: #fff;
+    }
+    .role-card.security { border-top-color: #ef315c; }
+    .role-card.cloud { border-top-color: #df7d00; }
+    .role-card.database { border-top-color: #7c45ef; }
+    .role-card.message { border-top-color: #f56b1b; }
+    .role-card.external { border-top-color: #718198; }
+    .role-card h3 {
+      margin: 0 0 8px;
+      color: #1e2a26;
+      font-family: "SFMono-Regular", Consolas, monospace;
+      font-size: 21px;
+      line-height: 1.2;
+      letter-spacing: -.03em;
+    }
+    .role-card p {
+      margin: 0;
+      color: #56675f;
+      font-size: 18px;
+      font-weight: 520;
+      line-height: 1.45;
+      letter-spacing: -.012em;
+    }
   </style>
 </head>
 <body>
@@ -47,5 +93,22 @@
   <div class="caption">
     <p>패키지·변경·공개 공지를 수집해 코드 가설을 만들고, 도달성·제한 PoC·중복 여부와 근거를 차례로 검증합니다.<br>검증 결과는 GHSA·CVE 제보 초안으로 정리하며 외부 제출은 사람이 직접 수행합니다.</p>
   </div>
+  <section class="roles" aria-label="에이전트별 역할">
+    <h2>12개 에이전트 역할</h2>
+    <div class="role-grid">
+      <article class="role-card"><h3>InventoryAgent</h3><p>매니페스트를 읽어 저장소에서 배포되는 패키지와 생태계를 식별합니다.</p></article>
+      <article class="role-card cloud"><h3>ChangeAgent</h3><p>릴리스와 커밋을 수집해 프로젝트의 공개 변경 이력을 시간순으로 정리합니다.</p></article>
+      <article class="role-card security"><h3>AdvisoryAgent</h3><p>GitHub·OSV의 CVE/GHSA 공지를 수집하고 패키지 및 저장소와 연결합니다.</p></article>
+      <article class="role-card security"><h3>CandidateAgent</h3><p>공개 변경 중 보안과 관련될 가능성이 있는 항목을 검토 후보로 선별합니다.</p></article>
+      <article class="role-card"><h3>RepositoryProfilerAgent</h3><p>언어·프레임워크·의존성·외부 진입점을 파악해 실제 코드 조사 범위를 정합니다.</p></article>
+      <article class="role-card security"><h3>SourceScanAgent</h3><p>외부 입력에서 위험 동작까지 이어지는 코드 경로를 취약점 가설로 찾습니다.</p></article>
+      <article class="role-card security"><h3>ReachabilityGateAgent</h3><p>후보 경로가 기본 설정의 외부 진입점에서 실제로 도달 가능한지 확인합니다.</p></article>
+      <article class="role-card message"><h3>ResearchOrchestrator</h3><p>후보 우선순위화부터 제한 PoC와 근거 판정까지 전체 조사 단계를 조율합니다.</p></article>
+      <article class="role-card security"><h3>PocValidatorAgent</h3><p>격리된 환경에서 정상 입력과 공격 입력을 대조해 관측 가능한 차이를 기록합니다.</p></article>
+      <article class="role-card database"><h3>DuplicateReviewAgent</h3><p>기존 공지와 과거 보안 변경을 비교해 이미 알려진 취약점인지 검토합니다.</p></article>
+      <article class="role-card security"><h3>EvidenceGateAgent</h3><p>도달성·기본 설정·입력 통제·영향·중복 여부의 근거가 충분한지 판정합니다.</p></article>
+      <article class="role-card external"><h3>DisclosureAgent</h3><p>검증된 근거를 GHSA 비공개 제보 초안과 CVE 요청 브리프로 정리합니다.</p></article>
+    </div>
+  </section>
 </body>
 </html>
