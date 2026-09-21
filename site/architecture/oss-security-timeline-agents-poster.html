@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>OSS Security Timeline · 12개 에이전트 구조도</title>
+  <style>
+    * { box-sizing: border-box; }
+    html, body { width: 2144px; min-height: 1588px; margin: 0; overflow: hidden; }
+    body {
+      background: #f8fafc;
+      color: #17231f;
+      font-family: Pretendard, "Apple SD Gothic Neo", "Noto Sans KR", system-ui, sans-serif;
+    }
+    iframe { display: block; width: 2144px; height: 1392px; border: 0; }
+    .caption {
+      display: grid;
+      grid-template-columns: 8px 1fr;
+      gap: 28px;
+      align-items: center;
+      height: 196px;
+      padding: 30px 80px;
+      border-top: 1px solid #dce5e1;
+      background: #ffffff;
+    }
+    .caption::before {
+      content: "";
+      width: 8px;
+      height: 92px;
+      border-radius: 999px;
+      background: #24956d;
+    }
+    p {
+      max-width: 1900px;
+      margin: 0;
+      color: #40544b;
+      font-size: 27px;
+      font-weight: 620;
+      line-height: 1.65;
+      letter-spacing: -.018em;
+      word-break: keep-all;
+    }
+  </style>
+</head>
+<body>
+  <iframe src="../agent-architecture.html?embed=1" title="OSS Security Timeline 12개 에이전트 구조도"></iframe>
+  <div class="caption">
+    <p>패키지·변경·공개 공지를 수집해 코드 가설을 만들고, 도달성·제한 PoC·중복 여부와 근거를 차례로 검증합니다.<br>검증 결과는 GHSA·CVE 제보 초안으로 정리하며 외부 제출은 사람이 직접 수행합니다.</p>
+  </div>
+</body>
+</html>
