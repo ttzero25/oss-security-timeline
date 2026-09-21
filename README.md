@@ -6,6 +6,8 @@ GitHub 오픈소스 저장소의 업데이트와 CVE·GHSA·OSV 공지를 시간
 
 프로젝트 제안서: [ttzero25.github.io/oss-security-timeline/proposal.html](https://ttzero25.github.io/oss-security-timeline/proposal.html)
 
+12개 에이전트 구조도 PNG: [site/architecture/oss-security-timeline-agents.png](site/architecture/oss-security-timeline-agents.png)
+
 > 코드 후보는 취약점이나 제로데이 확정 결과가 아닙니다. 외부 제보와 CVE/GHSA 요청은 항상 사람이 검토하고 직접 수행합니다.
 
 ## 무엇을 제공하나
